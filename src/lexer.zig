@@ -349,7 +349,6 @@ pub const Lexer = struct {
 
     fn lexString(self: *Self, line: usize, column: usize, start: usize) !Token {
         var buffer: std.ArrayList(u8) = .empty;
-        defer buffer.deinit(self.allocator);
         const initial_string_depth = self.string_depth;
         self.advance(); // Skip opening "
 
@@ -357,7 +356,7 @@ pub const Lexer = struct {
             const ch = try self.currentByte() orelse return error.UnterminatedString;
             if (ch == '"') {
                 self.advance();
-                const str = try buffer.toOwnedSlice(self.allocator);
+                const str = buffer.items;
                 try self.allocated_strings.append(self.allocator, str);
                 const had_interpolation = self.string_depth > initial_string_depth;
                 const kind: TokenKind = if (had_interpolation) .string_end else .string;
@@ -370,7 +369,7 @@ pub const Lexer = struct {
                 self.setIndentedString(false);
                 self.advance();
                 self.advance();
-                const str = try buffer.toOwnedSlice(self.allocator);
+                const str = buffer.items;
                 try self.allocated_strings.append(self.allocator, str);
                 return Token{ .kind = .string_part, .value = .{ .string = str }, .line = line, .column = column, .offset = start };
             }
@@ -609,7 +608,7 @@ pub const Lexer = struct {
 
     fn lexIdentifier(self: *Self, line: usize, column: usize, start: usize) !Token {
         var id_buf: std.ArrayList(u8) = .empty;
-        defer id_buf.deinit(self.allocator);
+        // defer id_buf.deinit(self.allocator);
 
         while (true) {
             const ch = try self.currentByte() orelse break;
@@ -623,9 +622,8 @@ pub const Lexer = struct {
         const kind: TokenKind = if (std.mem.eql(u8, text, "if")) .kw_if else if (std.mem.eql(u8, text, "then")) .kw_then else if (std.mem.eql(u8, text, "else")) .kw_else else if (std.mem.eql(u8, text, "assert")) .kw_assert else if (std.mem.eql(u8, text, "with")) .kw_with else if (std.mem.eql(u8, text, "let")) .kw_let else if (std.mem.eql(u8, text, "in")) .kw_in else if (std.mem.eql(u8, text, "rec")) .kw_rec else if (std.mem.eql(u8, text, "inherit")) .kw_inherit else if (std.mem.eql(u8, text, "or")) .kw_or else .identifier;
 
         if (kind == .identifier) {
-            const owned = try self.allocator.dupe(u8, text);
-            try self.allocated_strings.append(self.allocator, owned);
-            return Token{ .kind = .identifier, .value = .{ .identifier = owned }, .line = line, .column = column, .offset = start };
+            try self.allocated_strings.append(self.allocator, id_buf.items);
+            return Token{ .kind = .identifier, .value = .{ .identifier = id_buf.items }, .line = line, .column = column, .offset = start };
         }
         return Token{ .kind = kind, .value = .none, .line = line, .column = column, .offset = start };
     }
@@ -640,7 +638,7 @@ pub const Lexer = struct {
                 self.advance();
             } else break;
         }
-        const path = try path_buf.toOwnedSlice(self.allocator);
+        const path = path_buf.items;
         try self.allocated_strings.append(self.allocator, path);
         return Token{ .kind = .path, .value = .{ .path = path }, .line = line, .column = column, .offset = start };
     }

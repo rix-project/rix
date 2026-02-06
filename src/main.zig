@@ -44,6 +44,12 @@ pub fn main(init: std.process.Init) !void {
             }
         } else if (std.mem.eql(u8, first_arg, "eval")) {
             mode = .eval;
+        } else if (std.mem.eql(u8, first_arg, "--expr")) {
+            expr_string = args_iter.next() orelse {
+                std.debug.print("Error: --expr requires an expression argument\n", .{});
+                return error.InvalidArgument;
+            };
+            mode = .eval;
         } else if (std.mem.eql(u8, first_arg, "repl")) {
             mode = .repl;
         } else if (std.mem.eql(u8, first_arg, "--lex")) {
@@ -96,37 +102,39 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    var read_buf: [8192]u8 = undefined;
+    var file_holder: ?std.Io.File = null;
+    defer if (file_holder) |f| f.close(io);
 
-    // TODO: handle non source and return early (repl, build, flake_*)
+    var file_reader_holder: File.Reader = undefined;
+    var fixed_reader_holder: std.Io.Reader = undefined;
+    var read_buf: [4096]u8 = undefined;
 
-    var source = blk: {
+    const source: *std.Io.Reader = blk: {
         if (expr_string) |expr| {
-            break :blk std.Io.Reader.fixed(expr);
+            fixed_reader_holder = std.Io.Reader.fixed(expr);
+            break :blk &fixed_reader_holder;
         } else if (input_file) |file_path| {
-            // Check if it's a directory (flake)
             const stat = Dir.statFile(.cwd(), io, file_path, .{}) catch {
-                // Try as direct file
                 const file = try Dir.openFile(.cwd(), io, file_path, .{});
-                defer file.close(io);
-                break :blk file.readerStreaming(io, &read_buf).interface;
+                file_holder = file;
+                file_reader_holder = file.readerStreaming(io, &read_buf);
+                break :blk &file_reader_holder.interface;
             };
 
             if (stat.kind == .directory) {
-                // It's a flake directory
-                const flake_path = try std.fs.path.join(allocator, &.{ file_path, "default.nix" });
+                const flake_path = try std.fs.path.join(allocator, &.{ file_path, "flake.nix" });
                 defer allocator.free(flake_path);
 
-                const file = Dir.openFile(.cwd(), io, flake_path, .{}) catch {
-                    return error.NoDefaultNix;
-                };
-                defer file.close(io);
-                break :blk file.readerStreaming(io, &read_buf).interface;
+                const file = try Dir.openFile(.cwd(), io, flake_path, .{});
+                file_holder = file;
+                file_reader_holder = file.readerStreaming(io, &read_buf);
+                break :blk &file_reader_holder.interface;
             }
 
             const file = try Dir.openFile(.cwd(), io, file_path, .{});
-            defer file.close(io);
-            break :blk file.readerStreaming(io, &read_buf).interface;
+            file_holder = file;
+            file_reader_holder = file.readerStreaming(io, &read_buf);
+            break :blk &file_reader_holder.interface;
         } else {
             const stdin = File.stdin();
             const stdin_is_tty = try stdin.isTty(io);
@@ -134,21 +142,15 @@ pub fn main(init: std.process.Init) !void {
                 printHelp();
                 return;
             }
-            // Read from stdin
-            break :blk stdin.readerStreaming(io, &read_buf).interface;
+            file_reader_holder = stdin.readerStreaming(io, &read_buf);
+            break :blk &file_reader_holder.interface;
         }
     };
 
     switch (mode) {
-        .lex => {
-            try runLexer(allocator, &source);
-        },
-        .parse => {
-            try runParser(allocator, &source, print_ast);
-        },
-        .eval => {
-            try runEvaluator(allocator, io, &source, input_file);
-        },
+        .lex => try runLexer(allocator, source),
+        .parse => try runParser(allocator, source, print_ast),
+        .eval => try runEvaluator(allocator, io, source, input_file),
         .build => try runBuild(allocator, io, input_file orelse ".", attr_path),
         .flake_show => try runFlakeShow(allocator, io, input_file orelse "."),
         .flake_metadata => try runFlakeMetadata(allocator, io, input_file orelse "."),
@@ -246,19 +248,21 @@ fn runEvaluator(allocator: std.mem.Allocator, io: Io, source: *std.Io.Reader, fi
     var evaluator = try eval.Evaluator.init(allocator, io);
     defer evaluator.deinit();
 
-    // Parse using arena allocator so AST strings survive
-    var p = try parser.Parser.init(evaluator.allocator, source, file_path orelse "<stdin>");
+    // Parse using evaluator's arena allocator so AST strings survive
+    var p = try parser.Parser.init(evaluator.alloc(), source, file_path orelse "<stdin>");
     defer p.deinit();
     const ast_expr = try p.parseExpr();
 
     const result = try evaluator.eval(ast_expr);
     // Don't deinit result - values are shared across envs/thunks.
-    // The allocator (debug or GPA) will reclaim on process exit.
+    // The allocator (arena) will reclaim everything on evaluator.deinit().
 
     // Print result
     // Print result - force thunks for display
     printValue(result, &evaluator);
     std.debug.print("\n", .{});
+
+    // AST is owned by arena now, no need to deinit separately
 }
 
 fn printValue(value: eval.Value, evaluator: ?*eval.Evaluator) void {

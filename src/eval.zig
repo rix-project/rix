@@ -120,23 +120,17 @@ pub const Env = struct {
 };
 
 pub const Evaluator = struct {
-    allocator: std.mem.Allocator,
-    backing_allocator: std.mem.Allocator,
-    arena: *std.heap.ArenaAllocator,
+    parent_allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
     global_env: *Env,
     io: std.Io,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Self {
-        // Heap-allocate the arena so its address is stable after struct moves
-        const arena = try allocator.create(std.heap.ArenaAllocator);
-        arena.* = std.heap.ArenaAllocator.init(allocator);
-
         var self = Self{
-            .allocator = arena.allocator(),
-            .backing_allocator = allocator,
-            .arena = arena,
+            .parent_allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
             .global_env = undefined,
             .io = io,
         };
@@ -152,15 +146,20 @@ pub const Evaluator = struct {
 
     pub fn deinit(self: *Self) void {
         self.arena.deinit();
-        self.backing_allocator.destroy(self.arena);
+    }
+
+    /// Get the arena allocator for allocations during evaluation
+    pub inline fn alloc(self: *Self) std.mem.Allocator {
+        return self.arena.allocator();
     }
 
     /// Create an Env via the arena allocator.
     pub fn createEnv(self: *Self, parent: ?*Env) !*Env {
-        const env = try self.allocator.create(Env);
+        const allocator = self.arena.allocator();
+        const env = try allocator.create(Env);
         env.* = Env{
-            .allocator = self.allocator,
-            .bindings = std.StringHashMap(Value).init(self.allocator),
+            .allocator = allocator,
+            .bindings = std.StringHashMap(Value).init(allocator),
             .parent = parent,
         };
         return env;
@@ -168,7 +167,8 @@ pub const Evaluator = struct {
 
     /// Create a Thunk via the arena allocator.
     fn createThunk(self: *Self, expr: *Expr, env: *Env) !*Thunk {
-        const thunk = try self.allocator.create(Thunk);
+        const allocator = self.arena.allocator();
+        const thunk = try allocator.create(Thunk);
         thunk.* = Thunk{
             .expr = expr,
             .env = env,
@@ -208,38 +208,38 @@ pub const Evaluator = struct {
             .interpolated_string => |is| {
                 // Evaluate all parts and concatenate
                 var result: std.ArrayList(u8) = .empty;
-                defer result.deinit(self.allocator);
+                defer result.deinit(self.alloc());
 
                 for (is.parts) |part| {
                     switch (part) {
-                        .literal => |lit| try result.appendSlice(self.allocator, lit),
+                        .literal => |lit| try result.appendSlice(self.alloc(), lit),
                         .expr => |e| {
                             const val = try self.evalInEnv(e.*, env);
                             const forced = try self.force(val);
                             // Coerce to string (Nix string interpolation rules)
                             switch (forced) {
-                                .string => |s| try result.appendSlice(self.allocator, s),
+                                .string => |s| try result.appendSlice(self.alloc(), s),
                                 .int => |i| {
                                     var buf: [32]u8 = undefined;
                                     const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch "";
-                                    try result.appendSlice(self.allocator, s);
+                                    try result.appendSlice(self.alloc(), s);
                                 },
-                                .path => |p| try result.appendSlice(self.allocator, p),
-                                .bool => |b| try result.appendSlice(self.allocator, if (b) "1" else "0"),
-                                .null_val => try result.appendSlice(self.allocator, ""),
+                                .path => |p| try result.appendSlice(self.alloc(), p),
+                                .bool => |b| try result.appendSlice(self.alloc(), if (b) "1" else "0"),
+                                .null_val => try result.appendSlice(self.alloc(), ""),
                                 .attrs => |a| {
                                     // Nix coerces attrsets with __toString or outPath
                                     if (a.bindings.get("__toString")) |to_str_fn| {
                                         const str_val = try self.apply(to_str_fn, forced);
                                         const forced_str = try self.force(str_val);
                                         if (forced_str == .string) {
-                                            try result.appendSlice(self.allocator, forced_str.string);
+                                            try result.appendSlice(self.alloc(), forced_str.string);
                                         }
                                     } else if (a.bindings.get("outPath")) |out_path| {
                                         const forced_path = try self.force(out_path);
                                         switch (forced_path) {
-                                            .string => |s| try result.appendSlice(self.allocator, s),
-                                            .path => |p| try result.appendSlice(self.allocator, p),
+                                            .string => |s| try result.appendSlice(self.alloc(), s),
+                                            .path => |p| try result.appendSlice(self.alloc(), p),
                                             else => return error.TypeError,
                                         }
                                     } else {
@@ -249,14 +249,14 @@ pub const Evaluator = struct {
                                 .float => |f| {
                                     var buf: [64]u8 = undefined;
                                     const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch "";
-                                    try result.appendSlice(self.allocator, s);
+                                    try result.appendSlice(self.alloc(), s);
                                 },
                                 else => return error.TypeError,
                             }
                         },
                     }
                 }
-                return Value{ .string = try result.toOwnedSlice(self.allocator) };
+                return Value{ .string = try result.toOwnedSlice(self.alloc()) };
             },
             .path => |p| return Value{ .path = p },
             .uri => |u| return Value{ .string = u },
@@ -272,7 +272,7 @@ pub const Evaluator = struct {
             },
 
             .list => |l| {
-                var values = try self.allocator.alloc(Value, l.elements.len);
+                var values = try self.alloc().alloc(Value, l.elements.len);
                 for (l.elements, 0..) |elem, i| {
                     values[i] = try self.evalInEnv(elem, env);
                 }
@@ -282,7 +282,7 @@ pub const Evaluator = struct {
             .attrs => |a| {
                 var attr_env = try self.createEnv(env);
                 _ = &attr_env;
-                var bindings = std.StringHashMap(Value).init(self.allocator);
+                var bindings = std.StringHashMap(Value).init(self.alloc());
 
                 // If recursive, evaluate in extended env
                 if (a.recursive) {
@@ -394,7 +394,7 @@ pub const Evaluator = struct {
 
                         if (total_args < b.arity) {
                             // Not enough args yet - return a new partial application
-                            const new_partial = try self.allocator.alloc(Value, total_args);
+                            const new_partial = try self.alloc().alloc(Value, total_args);
                             @memcpy(new_partial[0..prev_args.len], prev_args);
                             new_partial[prev_args.len] = arg;
                             return Value{
@@ -408,14 +408,14 @@ pub const Evaluator = struct {
                         }
 
                         // Have all args - force them and call the function
-                        const args = try self.allocator.alloc(Value, total_args);
+                        const args = try self.alloc().alloc(Value, total_args);
                         @memcpy(args[0..prev_args.len], prev_args);
                         args[prev_args.len] = arg;
                         // Force all args before passing to builtin
                         for (args) |*a| {
                             a.* = try self.force(a.*);
                         }
-                        return try b.func(self, self.io, self.allocator, args);
+                        return try b.func(self, self.io, self.alloc(), args);
                     },
                     else => {
                         return error.NotAFunction;
@@ -538,17 +538,17 @@ pub const Evaluator = struct {
                 }
                 // String concatenation
                 if (lval == .string and rval == .string) {
-                    const result = try std.mem.concat(self.allocator, u8, &.{ lval.string, rval.string });
+                    const result = try std.mem.concat(self.alloc(), u8, &.{ lval.string, rval.string });
                     return Value{ .string = result };
                 }
                 // Path + string = path concatenation
                 if (lval == .path and rval == .string) {
-                    const result = try std.mem.concat(self.allocator, u8, &.{ lval.path, rval.string });
+                    const result = try std.mem.concat(self.alloc(), u8, &.{ lval.path, rval.string });
                     return Value{ .path = result };
                 }
                 // String + path = string concatenation
                 if (lval == .string and rval == .path) {
-                    const result = try std.mem.concat(self.allocator, u8, &.{ lval.string, rval.path });
+                    const result = try std.mem.concat(self.alloc(), u8, &.{ lval.string, rval.path });
                     return Value{ .string = result };
                 }
                 return error.TypeError;
@@ -589,7 +589,7 @@ pub const Evaluator = struct {
             },
             .concat => {
                 if (lval == .list and rval == .list) {
-                    const new_list = try self.allocator.alloc(Value, lval.list.len + rval.list.len);
+                    const new_list = try self.alloc().alloc(Value, lval.list.len + rval.list.len);
                     @memcpy(new_list[0..lval.list.len], lval.list);
                     @memcpy(new_list[lval.list.len..], rval.list);
                     return Value{ .list = new_list };
@@ -598,7 +598,7 @@ pub const Evaluator = struct {
             },
             .update => {
                 if (lval == .attrs and rval == .attrs) {
-                    var new_bindings = std.StringHashMap(Value).init(self.allocator);
+                    var new_bindings = std.StringHashMap(Value).init(self.alloc());
                     var iter = lval.attrs.bindings.iterator();
                     while (iter.next()) |entry| {
                         try new_bindings.put(entry.key_ptr.*, entry.value_ptr.*);
@@ -765,7 +765,7 @@ pub const Evaluator = struct {
                 const total_args = prev_args.len + 1;
 
                 if (total_args < b.arity) {
-                    const new_partial = try self.allocator.alloc(Value, total_args);
+                    const new_partial = try self.alloc().alloc(Value, total_args);
                     @memcpy(new_partial[0..prev_args.len], prev_args);
                     new_partial[prev_args.len] = arg;
                     return Value{
@@ -778,13 +778,13 @@ pub const Evaluator = struct {
                     };
                 }
 
-                const args = try self.allocator.alloc(Value, total_args);
+                const args = try self.alloc().alloc(Value, total_args);
                 @memcpy(args[0..prev_args.len], prev_args);
                 args[prev_args.len] = arg;
                 for (args) |*a| {
                     a.* = try self.force(a.*);
                 }
-                return try b.func(self, self.io, self.allocator, args);
+                return try b.func(self, self.io, self.alloc(), args);
             },
             else => return error.NotAFunction,
         }

@@ -52,48 +52,57 @@ pub const FlakeRef = struct {
         if (input.len == 0 or input[0] == '.' or input[0] == '/') {
             ref.type = .path;
             ref.url = try allocator.dupe(u8, if (input.len == 0) "." else input);
+            var _sum: u32 = 0;
+            for (ref.url) |c| _sum += @as(u32, c);
+            std.debug.print("[flakeref] parse.path -> url (len={d} sum={d} ptr={*})\n", .{ ref.url.len, _sum, ref.url.ptr });
             return ref;
         }
 
-        // github:owner/repo[/ref][?rev=...]
+        // github:owner/repo[/...][?rev=...&ref=...&dir=...]
         if (std.mem.startsWith(u8, input, "github:")) {
             ref.type = .github;
             const rest = input["github:".len..];
 
-            // Parse owner/repo
+            // Parse owner and repo
             var parts = std.mem.splitScalar(u8, rest, '/');
             const owner = parts.next() orelse return error.InvalidFlakeRef;
-            const repo_and_rest = parts.next() orelse return error.InvalidFlakeRef;
+            const repo = parts.next() orelse return error.InvalidFlakeRef;
 
-            // Check for query params
-            if (std.mem.indexOf(u8, repo_and_rest, "?")) |q_idx| {
-                const repo = repo_and_rest[0..q_idx];
-                ref.url = try std.fmt.allocPrint(allocator, "https://github.com/{s}/{s}", .{ owner, repo });
+            // Remaining path components (if any) are part of the ref/dir
+            const remaining = parts.rest();
+            if (remaining.len > 0) {
+                // Check for query params in the remaining segment
+                if (std.mem.indexOf(u8, remaining, "?")) |q_idx| {
+                    const maybe_ref = remaining[0..q_idx];
+                    if (maybe_ref.len > 0) ref.ref = try allocator.dupe(u8, maybe_ref);
 
-                // Parse query params
-                const query = repo_and_rest[q_idx + 1 ..];
-                var params = std.mem.splitScalar(u8, query, '&');
-                while (params.next()) |param| {
-                    if (std.mem.indexOf(u8, param, "=")) |eq_idx| {
-                        const key = param[0..eq_idx];
-                        const value = param[eq_idx + 1 ..];
-                        if (std.mem.eql(u8, key, "rev")) {
-                            ref.rev = try allocator.dupe(u8, value);
-                        } else if (std.mem.eql(u8, key, "ref")) {
-                            ref.ref = try allocator.dupe(u8, value);
-                        } else if (std.mem.eql(u8, key, "dir")) {
-                            ref.dir = try allocator.dupe(u8, value);
+                    const query = remaining[q_idx + 1 ..];
+                    var params = std.mem.splitScalar(u8, query, '&');
+                    while (params.next()) |param| {
+                        if (std.mem.indexOf(u8, param, "=")) |eq_idx| {
+                            const key = param[0..eq_idx];
+                            const value = param[eq_idx + 1 ..];
+                            if (std.mem.eql(u8, key, "rev")) {
+                                ref.rev = try allocator.dupe(u8, value);
+                            } else if (std.mem.eql(u8, key, "ref")) {
+                                ref.ref = try allocator.dupe(u8, value);
+                            } else if (std.mem.eql(u8, key, "dir")) {
+                                ref.dir = try allocator.dupe(u8, value);
+                            }
                         }
                     }
-                }
-            } else {
-                // Maybe has ref as third path component
-                if (parts.next()) |maybe_ref| {
-                    ref.ref = try allocator.dupe(u8, maybe_ref);
-                    ref.url = try std.fmt.allocPrint(allocator, "https://github.com/{s}/{s}", .{ owner, repo_and_rest });
                 } else {
-                    ref.url = try std.fmt.allocPrint(allocator, "https://github.com/{s}/{s}", .{ owner, repo_and_rest });
+                    // No query params: treat the entire remaining path as the ref
+                    ref.ref = try allocator.dupe(u8, remaining);
                 }
+            }
+
+            // Base URL is just owner/repo
+            ref.url = try std.fmt.allocPrint(allocator, "https://github.com/{s}/{s}", .{ owner, repo });
+            if (ref.ref) |r| {
+                var _sum_ref: u32 = 0;
+                for (r) |c| _sum_ref += @as(u32, c);
+                std.debug.print("[flakeref] parse.github -> ref (len={d} sum={d} ptr={*})\n", .{ r.len, _sum_ref, r.ptr });
             }
             return ref;
         }
@@ -106,6 +115,9 @@ pub const FlakeRef = struct {
             const owner = parts.next() orelse return error.InvalidFlakeRef;
             const repo = parts.next() orelse return error.InvalidFlakeRef;
             ref.url = try std.fmt.allocPrint(allocator, "https://gitlab.com/{s}/{s}", .{ owner, repo });
+            var _sum_url: u32 = 0;
+            for (ref.url) |c| _sum_url += @as(u32, c);
+            std.debug.print("[flakeref] parse.gitlab -> url (len={d} sum={d} ptr={*})\n", .{ ref.url.len, _sum_url, ref.url.ptr });
             return ref;
         }
 
@@ -117,6 +129,9 @@ pub const FlakeRef = struct {
             // Check for query params
             if (std.mem.indexOf(u8, url_part, "?")) |q_idx| {
                 ref.url = try allocator.dupe(u8, url_part[0..q_idx]);
+                var _sum_url_part: u32 = 0;
+                for (ref.url) |c| _sum_url_part += @as(u32, c);
+                std.debug.print("[flakeref] parse.git -> url (len={d} sum={d} ptr={*})\n", .{ ref.url.len, _sum_url_part, ref.url.ptr });
                 const query = url_part[q_idx + 1 ..];
                 var params = std.mem.splitScalar(u8, query, '&');
                 while (params.next()) |param| {
@@ -134,6 +149,9 @@ pub const FlakeRef = struct {
                 }
             } else {
                 ref.url = try allocator.dupe(u8, url_part);
+                var _sum_url_part2: u32 = 0;
+                for (ref.url) |c| _sum_url_part2 += @as(u32, c);
+                std.debug.print("[flakeref] parse.git -> url (len={d} sum={d} ptr={*})\n", .{ ref.url.len, _sum_url_part2, ref.url.ptr });
             }
             return ref;
         }
@@ -142,12 +160,18 @@ pub const FlakeRef = struct {
         if (std.mem.startsWith(u8, input, "https://") or std.mem.startsWith(u8, input, "http://")) {
             ref.type = .tarball;
             ref.url = try allocator.dupe(u8, input);
+            var _sum_tarball: u32 = 0;
+            for (ref.url) |c| _sum_tarball += @as(u32, c);
+            std.debug.print("[flakeref] parse.tarball -> url (len={d} sum={d} ptr={*})\n", .{ ref.url.len, _sum_tarball, ref.url.ptr });
             return ref;
         }
 
         // Indirect reference (e.g., "nixpkgs")
         ref.type = .indirect;
         ref.url = try allocator.dupe(u8, input);
+        var _sum_indirect: u32 = 0;
+        for (ref.url) |c| _sum_indirect += @as(u32, c);
+        std.debug.print("[flakeref] parse.indirect -> url (len={d} sum={d} ptr={*})\n", .{ ref.url.len, _sum_indirect, ref.url.ptr });
         return ref;
     }
 

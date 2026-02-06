@@ -223,15 +223,18 @@ fn builtinImport(eval_ctx: ?*Evaluator, io: std.Io, allocator: std.mem.Allocator
     var file_path: []const u8 = import_path;
     var free_file_path = false;
 
-    const stat = Dir.statFile(.cwd(), io, import_path, .{}) catch {
-        // Path doesn't exist - try as-is
-        file_path = import_path;
-        return error.FileNotFound;
-    };
+    const stat = Dir.statFile(.cwd(), io, import_path, .{}) catch null;
 
-    if (stat.kind == .directory) {
-        file_path = try std.fs.path.join(allocator, &.{ import_path, "default.nix" });
-        free_file_path = true;
+    if (stat == null) {
+        // stat failed (path may not exist) - try import_path as-is
+        file_path = import_path;
+    } else if (stat) |st| {
+        if (st.kind == .directory) {
+            file_path = try std.fs.path.join(allocator, &.{ import_path, "default.nix" });
+            free_file_path = true;
+        } else {
+            file_path = import_path;
+        }
     }
     defer if (free_file_path) allocator.free(file_path);
 

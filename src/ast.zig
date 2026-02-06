@@ -170,7 +170,9 @@ pub const Expr = union(enum) {
                 for (is.parts) |part| {
                     switch (part) {
                         // Literals are slices into source, don't free
-                        .literal => {},
+                        .literal => |l| {
+                            allocator.free(l);
+                        },
                         .expr => |e| {
                             e.deinit(allocator);
                             allocator.destroy(e);

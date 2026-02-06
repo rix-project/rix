@@ -24,6 +24,10 @@ pub const Parser = struct {
         const current = try lex.nextToken();
         const peek = try lex.nextToken();
 
+        var _sum: usize = 0;
+        for (filename) |b| _sum += @as(usize, b);
+        std.debug.print("[Parser.init] filename: {s} (len={d} sum={d})\n", .{ filename, filename.len, _sum });
+
         return Self{
             .allocator = allocator,
             .lexer = lex,
@@ -405,7 +409,6 @@ pub const Parser = struct {
         try self.expect(.lbracket);
 
         var elements = std.ArrayList(Expr).empty;
-        defer elements.deinit(self.allocator);
 
         while (self.current.kind != .rbracket and self.current.kind != .eof) {
             // List elements are "select" expressions (atoms + . selects), not full expressions.
@@ -569,7 +572,6 @@ pub const Parser = struct {
     /// and consumed the first identifier
     fn finishPattern(self: *Self, start: usize, line: usize, column: usize, first_name: []const u8) !Expr {
         var formals = std.ArrayList(Expr.Formal).empty;
-        defer formals.deinit(self.allocator);
 
         // First formal
         var first_default: ?*Expr = null;

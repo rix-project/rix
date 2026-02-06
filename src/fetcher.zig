@@ -36,29 +36,34 @@ pub const Fetcher = struct {
         self.http_fetcher.deinit();
     }
 
-    pub fn fetch(self: *Fetcher, io: Io, ref: *const FlakeRef, base_path: []const u8, progress_node: std.Progress.Node) !FetchResult {
+    pub fn fetch(self: *Fetcher, io: Io, ref: *const FlakeRef, base_path: []const u8, progress_node: std.Progress.Node, out_alloc: std.mem.Allocator) !FetchResult {
         return switch (ref.type) {
-            .path => try self.fetchPath(ref, base_path),
-            .github => try self.fetchGitHub(io, ref, progress_node),
-            .gitlab => try self.fetchGitLab(io, ref, progress_node),
-            .git => try self.fetchGit(io, ref),
-            .tarball => try self.fetchTarball(io, ref, progress_node),
+            .path => try self.fetchPath(ref, base_path, out_alloc),
+            .github => try self.fetchGitHub(io, ref, progress_node, out_alloc),
+            .gitlab => try self.fetchGitLab(io, ref, progress_node, out_alloc),
+            .git => try self.fetchGit(io, ref, out_alloc),
+            .tarball => try self.fetchTarball(io, ref, progress_node, out_alloc),
             .indirect => return error.IndirectNotSupported,
         };
     }
 
-    fn fetchPath(self: *Fetcher, ref: *const FlakeRef, base_path: []const u8) !FetchResult {
+    fn fetchPath(self: *Fetcher, ref: *const FlakeRef, base_path: []const u8, out_alloc: std.mem.Allocator) !FetchResult {
         const resolved = try ref.resolve(self.allocator, base_path);
+        // Ensure returned path is owned by the caller allocator
+        const path_copy = try out_alloc.dupe(u8, resolved);
+        var _sum_pp: u32 = 0;
+        for (path_copy) |c| _sum_pp += @as(u32, c);
+        std.debug.print("[fetcher] fetchPath -> path {s} (len={d} sum={d} ptr={*})\n", .{ path_copy, path_copy.len, _sum_pp, path_copy.ptr });
         return FetchResult{
-            .path = resolved,
+            .path = path_copy,
             .rev = null,
             .last_modified = null,
             .nar_hash = null,
-            .allocator = self.allocator,
+            .allocator = out_alloc,
         };
     }
 
-    fn fetchGit(self: *Fetcher, io: Io, ref: *const FlakeRef) !FetchResult {
+    fn fetchGit(self: *Fetcher, io: Io, ref: *const FlakeRef, out_alloc: std.mem.Allocator) !FetchResult {
         _ = io;
         // Git is stubbed - will use git.zig from Zig compiler sources
         const url_hash = std.hash.Wyhash.hash(0, ref.url);
@@ -68,16 +73,21 @@ pub const Fetcher = struct {
             .{ self.cache_dir, url_hash },
         );
         std.debug.print("TODO: fetchGit for {s} (stubbed - will use git.zig)\n", .{ref.url});
+        // copy cache_path into caller allocator for return
+        const returned = try out_alloc.dupe(u8, cache_path);
+        var _sum: u32 = 0;
+        for (returned) |c| _sum += @as(u32, c);
+        std.debug.print("[fetcher] fetchGit -> path {s} (len={d} sum={d} ptr={*})\n", .{ returned, returned.len, _sum, returned.ptr });
         return FetchResult{
-            .path = cache_path,
-            .rev = if (ref.rev) |r| try self.allocator.dupe(u8, r) else null,
+            .path = returned,
+            .rev = if (ref.rev) |r| try out_alloc.dupe(u8, r) else null,
             .last_modified = null,
             .nar_hash = null,
-            .allocator = self.allocator,
+            .allocator = out_alloc,
         };
     }
 
-    fn fetchGitHub(self: *Fetcher, io: Io, ref: *const FlakeRef, progress_node: std.Progress.Node) !FetchResult {
+    fn fetchGitHub(self: *Fetcher, io: Io, ref: *const FlakeRef, progress_node: std.Progress.Node, out_alloc: std.mem.Allocator) !FetchResult {
         // Extract owner/repo from URL: https://github.com/owner/repo
         const github_prefix = "https://github.com/";
         if (!std.mem.startsWith(u8, ref.url, github_prefix)) {
@@ -98,34 +108,62 @@ pub const Fetcher = struct {
             "{s}/github/{s}/{s}/{s}",
             .{ self.cache_dir, owner, repo, rev },
         );
-        errdefer self.allocator.free(cache_path);
 
         // Check if already cached
         _ = Dir.statFile(.cwd(), io, cache_path, .{}) catch {
             // Not cached, download and extract
-            const archive_url = try std.fmt.allocPrint(
-                self.allocator,
-                "https://github.com/{s}/{s}/archive/{s}.tar.gz",
-                .{ owner, repo, rev },
-            );
-            defer self.allocator.free(archive_url);
+            // Try common archive URL forms. Some repositories require the
+            // refs/heads or refs/tags path prefixes for branch/tag downloads.
+            const base = "https://github.com/";
+            const form1 = try std.fmt.allocPrint(self.allocator, "{s}{s}/{s}/archive/{s}.tar.gz", .{ base, owner, repo, rev });
+            defer self.allocator.free(form1);
+
+            const form2 = try std.fmt.allocPrint(self.allocator, "{s}{s}/{s}/archive/refs/heads/{s}.tar.gz", .{ base, owner, repo, rev });
+            defer self.allocator.free(form2);
+
+            const form3 = try std.fmt.allocPrint(self.allocator, "{s}{s}/{s}/archive/refs/tags/{s}.tar.gz", .{ base, owner, repo, rev });
+            defer self.allocator.free(form3);
+
+            const tarball_path = try std.fmt.allocPrint(self.allocator, "{s}/github-{s}-{s}.tar.gz", .{ self.cache_dir, owner, repo });
+            defer self.allocator.free(tarball_path);
 
             try Dir.createDirPath(.cwd(), io, self.cache_dir);
 
-            const tarball_path = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}/github-{s}-{s}.tar.gz",
-                .{ self.cache_dir, owner, repo },
-            );
-            defer self.allocator.free(tarball_path);
+            const downloaded = try_download_blk: {
+                // try form1
+                const ok1 = try_form1_blk: {
+                    self.http_fetcher.downloadFile(io, form1, tarball_path, progress_node) catch {
+                        break :try_form1_blk false;
+                    };
+                    break :try_form1_blk true;
+                };
+                if (ok1) break :try_download_blk true;
 
-            try self.http_fetcher.downloadFile(io, archive_url, tarball_path, progress_node);
+                // try form2
+                const ok2 = try_form2_blk: {
+                    self.http_fetcher.downloadFile(io, form2, tarball_path, progress_node) catch {
+                        break :try_form2_blk false;
+                    };
+                    break :try_form2_blk true;
+                };
+                if (ok2) break :try_download_blk true;
 
-            const extract_dir = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}/extract-github-{s}-{s}",
-                .{ self.cache_dir, owner, repo },
-            );
+                // try form3
+                const ok3 = try_form3_blk: {
+                    self.http_fetcher.downloadFile(io, form3, tarball_path, progress_node) catch {
+                        break :try_form3_blk false;
+                    };
+                    break :try_form3_blk true;
+                };
+                if (ok3) break :try_download_blk true;
+
+                // none succeeded
+                break :try_download_blk false;
+            };
+
+            if (!downloaded) return error.HttpRequestFailed;
+
+            const extract_dir = try std.fmt.allocPrint(self.allocator, "{s}/extract-github-{s}-{s}", .{ self.cache_dir, owner, repo });
             defer self.allocator.free(extract_dir);
 
             Dir.createDirPath(.cwd(), io, extract_dir) catch {};
@@ -159,16 +197,25 @@ pub const Fetcher = struct {
             Dir.deleteTree(.cwd(), io, extract_dir) catch {};
         };
 
+        // copy the final cache_path into caller allocator for safe ownership
+        const returned = try out_alloc.dupe(u8, cache_path);
+        var _sum: u32 = 0;
+        for (returned) |c| _sum += @as(u32, c);
+        std.debug.print("[fetcher] fetchGitHub -> path {s} (len={d} sum={d} ptr={*})\n", .{ returned, returned.len, _sum, returned.ptr });
+        // Also log the original cached string allocated on fetcher allocator
+        var _sum_cache: u32 = 0;
+        for (cache_path) |c| _sum_cache += @as(u32, c);
+        std.debug.print("[fetcher] fetchGitHub cache_path produced on fetcher.alloc (len={d} sum={d} ptr={*})\n", .{ cache_path.len, _sum_cache, cache_path.ptr });
         return FetchResult{
-            .path = cache_path,
-            .rev = if (ref.rev) |r| try self.allocator.dupe(u8, r) else null,
+            .path = returned,
+            .rev = if (ref.rev) |r| try out_alloc.dupe(u8, r) else null,
             .last_modified = null,
             .nar_hash = null,
-            .allocator = self.allocator,
+            .allocator = out_alloc,
         };
     }
 
-    fn fetchGitLab(self: *Fetcher, io: Io, ref: *const FlakeRef, progress_node: std.Progress.Node) !FetchResult {
+    fn fetchGitLab(self: *Fetcher, io: Io, ref: *const FlakeRef, progress_node: std.Progress.Node, out_alloc: std.mem.Allocator) !FetchResult {
         // Extract owner/repo from URL: https://gitlab.com/owner/repo
         const gitlab_prefix = "https://gitlab.com/";
         if (!std.mem.startsWith(u8, ref.url, gitlab_prefix)) {
@@ -188,7 +235,6 @@ pub const Fetcher = struct {
             "{s}/gitlab/{s}/{s}/{s}",
             .{ self.cache_dir, owner, repo, rev },
         );
-        errdefer self.allocator.free(cache_path);
 
         _ = Dir.statFile(.cwd(), io, cache_path, .{}) catch {
             const archive_url = try std.fmt.allocPrint(
@@ -242,16 +288,20 @@ pub const Fetcher = struct {
             Dir.deleteTree(.cwd(), io, extract_dir) catch {};
         };
 
+        const returned = try out_alloc.dupe(u8, cache_path);
+        var _sum: u32 = 0;
+        for (returned) |c| _sum += @as(u32, c);
+        std.debug.print("[fetcher] fetchGitLab -> path {s} (len={d} sum={d})\n", .{ returned, returned.len, _sum });
         return FetchResult{
-            .path = cache_path,
-            .rev = if (ref.rev) |r| try self.allocator.dupe(u8, r) else null,
+            .path = returned,
+            .rev = if (ref.rev) |r| try out_alloc.dupe(u8, r) else null,
             .last_modified = null,
             .nar_hash = null,
-            .allocator = self.allocator,
+            .allocator = out_alloc,
         };
     }
 
-    fn fetchTarball(self: *Fetcher, io: Io, ref: *const FlakeRef, progress_node: std.Progress.Node) !FetchResult {
+    fn fetchTarball(self: *Fetcher, io: Io, ref: *const FlakeRef, progress_node: std.Progress.Node, out_alloc: std.mem.Allocator) !FetchResult {
         // Hash URL to create cache key
         const url_hash = std.hash.Wyhash.hash(0, ref.url);
         const cache_subdir = try std.fmt.allocPrint(
@@ -259,7 +309,6 @@ pub const Fetcher = struct {
             "{s}/tarball/{x}",
             .{ self.cache_dir, url_hash },
         );
-        errdefer self.allocator.free(cache_subdir);
 
         _ = Dir.statFile(.cwd(), io, cache_subdir, .{}) catch {
             const extract_temp = try std.fmt.allocPrint(
@@ -288,12 +337,16 @@ pub const Fetcher = struct {
             } else {
                 // No subdirectory – the temp dir IS the content
                 try Dir.rename(.cwd(), extract_temp, .cwd(), cache_subdir, io);
+                const returned = try out_alloc.dupe(u8, cache_subdir);
+                var _sum: u32 = 0;
+                for (returned) |c| _sum += @as(u32, c);
+                std.debug.print("[fetcher] fetchTarball -> path {s} (len={d} sum={d})\n", .{ returned, returned.len, _sum });
                 return FetchResult{
-                    .path = cache_subdir,
+                    .path = returned,
                     .rev = null,
                     .last_modified = null,
                     .nar_hash = null,
-                    .allocator = self.allocator,
+                    .allocator = out_alloc,
                 };
             };
 
@@ -304,12 +357,16 @@ pub const Fetcher = struct {
             Dir.deleteTree(.cwd(), io, extract_temp) catch {};
         };
 
+        const returned = try out_alloc.dupe(u8, cache_subdir);
+        var _sum: u32 = 0;
+        for (returned) |c| _sum += @as(u32, c);
+        std.debug.print("[fetcher] fetchTarball -> path {s} (len={d} sum={d})\n", .{ returned, returned.len, _sum });
         return FetchResult{
-            .path = cache_subdir,
+            .path = returned,
             .rev = null,
             .last_modified = null,
             .nar_hash = null,
-            .allocator = self.allocator,
+            .allocator = out_alloc,
         };
     }
 };

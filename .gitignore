@@ -54,4 +54,5 @@ flake-regressions
 .direnv/
 /zig-out
 .zig-cache/
-/zig-pkg
+zig-pkg/
+# *.log

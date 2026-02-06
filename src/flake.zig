@@ -36,6 +36,8 @@ pub const Flake = struct {
         if (self.description) |d| self.allocator.free(d);
         var iter = self.inputs.iterator();
         while (iter.next()) |entry| {
+            // Free the map key string allocated during parsing
+            self.allocator.free(entry.key_ptr.*);
             @constCast(&entry.value_ptr.ref).deinit();
             if (entry.value_ptr.follows) |f| {
                 for (f) |part| self.allocator.free(part);
@@ -46,8 +48,12 @@ pub const Flake = struct {
         // Clean up input_overrides
         var ovr_iter = self.input_overrides.iterator();
         while (ovr_iter.next()) |ovr_entry| {
+            // Free the override map key
+            self.allocator.free(ovr_entry.key_ptr.*);
             var sub_iter = ovr_entry.value_ptr.iterator();
             while (sub_iter.next()) |sub_entry| {
+                // Free sub-entry key and the stored parts array
+                self.allocator.free(sub_entry.key_ptr.*);
                 for (sub_entry.value_ptr.*) |part| self.allocator.free(part);
                 self.allocator.free(sub_entry.value_ptr.*);
             }
@@ -91,6 +97,7 @@ pub const ResolvedFlake = struct {
 /// The flake evaluator
 pub const FlakeEvaluator = struct {
     allocator: std.mem.Allocator,
+    parent_allocator: std.mem.Allocator,
     fetcher: Fetcher,
     registry: Registry,
     evaluator: eval.Evaluator,
@@ -99,14 +106,14 @@ pub const FlakeEvaluator = struct {
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !FlakeEvaluator {
         const evaluator = try eval.Evaluator.init(allocator, io);
-        // Use the evaluator's arena allocator for flake data too
-        const arena_alloc = evaluator.allocator;
+
         var fe = FlakeEvaluator{
-            .allocator = arena_alloc,
-            .fetcher = Fetcher.init(arena_alloc, io),
-            .registry = Registry.init(arena_alloc),
+            .allocator = allocator,
+            .parent_allocator = allocator,
+            .fetcher = Fetcher.init(std.heap.page_allocator, io),
+            .registry = Registry.init(allocator),
             .evaluator = evaluator,
-            .nix_store = store.Store.init(arena_alloc),
+            .nix_store = store.Store.init(allocator),
             .system = store.getCurrentSystem(),
         };
 
@@ -145,18 +152,62 @@ pub const FlakeEvaluator = struct {
     pub fn loadFlakeWithIo(self: *FlakeEvaluator, io: std.Io, path: []const u8) !Flake {
         const Dir = std.Io.Dir;
 
-        // Read flake.nix
-        const flake_path = try std.fs.path.join(self.allocator, &.{ path, "flake.nix" });
-        defer self.allocator.free(flake_path);
+        // Duplicate the incoming path into the evaluator allocator so we
+        // operate on a stable, owned buffer even if the caller later frees
+        // their copy.
+        const safe_input_path = try self.allocator.dupe(u8, path);
+        defer self.allocator.free(safe_input_path);
 
-        const file = try Dir.openFile(.cwd(), io, flake_path, .{});
+        // Determine the actual flake.nix file to read. If `path` refers to a
+        // directory, join it with "flake.nix". If it refers to an existing
+        // file, use it directly. If stat fails, try path + "/flake.nix" as a
+        // fallback.
+        var flake_path: ?[]const u8 = null;
+        var need_free: bool = false;
+
+        const stat_res = Dir.statFile(.cwd(), io, safe_input_path, .{}) catch null;
+        if (stat_res) |st| {
+            if (st.kind == .directory) {
+                flake_path = try std.fs.path.join(self.allocator, &.{ safe_input_path, "flake.nix" });
+                need_free = true;
+            } else {
+                // Path points to a file; use as-is
+                flake_path = safe_input_path;
+            }
+        } else {
+            // stat failed; try joining with flake.nix as a fallback
+            flake_path = try std.fs.path.join(self.allocator, &.{ safe_input_path, "flake.nix" });
+            need_free = true;
+        }
+
+        if (need_free) {
+            defer self.allocator.free(flake_path.?);
+        }
+
+        // Print flake path plus a simple checksum to detect corruption
+        var _sum: u32 = 0;
+        for (flake_path.?) |c| _sum += @as(u32, c);
+        std.debug.print("[loadFlakeWithIo] trying flake file: {s} (len={d} sum={d})\n", .{ flake_path.?, flake_path.?.len, _sum });
+
+        var file_opt: ?std.Io.File = Dir.openFile(.cwd(), io, flake_path.?, .{}) catch null;
+        if (file_opt == null) {
+            std.debug.print("[loadFlakeWithIo] open failed for {s} (len={d} sum={d})\n", .{ flake_path.?, flake_path.?.len, _sum });
+            // Try a simple fallback: look for ./flake.nix in CWD
+            const fallback = try std.fs.path.join(self.allocator, &.{ ".", "flake.nix" });
+            defer self.allocator.free(fallback);
+            std.debug.print("[loadFlakeWithIo] trying fallback flake file: {s}\n", .{fallback});
+            const fb = try Dir.openFile(.cwd(), io, fallback, .{});
+            file_opt = fb;
+        }
+
+        var file = file_opt.?;
         defer file.close(io);
 
         var read_buf: [8192]u8 = undefined;
         var reader = file.reader(io, &read_buf);
 
-        // Parse the flake.nix
-        var p = try parser.Parser.init(self.allocator, &reader.interface, flake_path);
+        // Parse the flake.nix using the evaluator arena so AST memory is reclaimed
+        var p = try parser.Parser.init(self.evaluator.alloc(), &reader.interface, flake_path.?);
         defer p.deinit();
 
         const flake_expr = try p.parseExpr();
@@ -171,7 +222,7 @@ pub const FlakeEvaluator = struct {
             .inputs = std.StringHashMap(Flake.FlakeInput).init(self.allocator),
             .input_overrides = std.StringHashMap(std.StringHashMap([]const []const u8)).init(self.allocator),
             .outputs_expr = undefined,
-            .path = try self.allocator.dupe(u8, path),
+            .path = try self.allocator.dupe(u8, safe_input_path),
             .allocator = self.allocator,
         };
         errdefer flake.deinit();
@@ -269,13 +320,15 @@ pub const FlakeEvaluator = struct {
                 .expr => return error.DynamicAttrPath,
             }
         }
-        return result.toOwnedSlice(self.allocator);
+        const owned = try result.toOwnedSlice(self.allocator);
+        var _sum: u32 = 0;
+        for (owned) |c| _sum += @as(u32, c);
+        std.debug.print("[attrPathToString] -> {s} (len={d} sum={d})\n", .{ owned, owned.len, _sum });
+        return owned;
     }
 
     fn parseInputs(self: *FlakeEvaluator, flake: *Flake, expr: Expr) !void {
         if (expr != .attrs) return;
-
-        std.debug.print("Parsing inputs, found {} bindings\n", .{expr.attrs.bindings.len});
 
         for (expr.attrs.bindings) |binding| {
             // Handle dotted attr paths like: nixpkgs-lib.url = "...";
@@ -365,7 +418,7 @@ pub const FlakeEvaluator = struct {
 
     /// Resolve all inputs and evaluate the flake
     pub fn resolve(self: *FlakeEvaluator, io: std.Io, flake: Flake, progress_node: std.Progress.Node) !ResolvedFlake {
-        return self.resolveWithParent(io, flake, progress_node, null, null);
+        return self.resolveWithParent(io, flake, progress_node, null, null, 0, null);
     }
 
     /// Resolve all inputs, with access to parent resolved inputs for follows
@@ -376,7 +429,23 @@ pub const FlakeEvaluator = struct {
         progress_node: std.Progress.Node,
         parent_inputs: ?*const std.StringHashMap(ResolvedFlake.ResolvedInput),
         parent_overrides: ?*const std.StringHashMap([]const []const u8),
+        depth: usize,
+        visited: ?*std.ArrayList([]const u8),
     ) !ResolvedFlake {
+        if (depth > 32) return error.InvalidFlake;
+        // Ensure we have a visited map for cycle detection. If none provided,
+        // create a temporary one that lives for the duration of this call.
+        var own_visited: std.ArrayList([]const u8) = .empty;
+        var visited_ptr: *std.ArrayList([]const u8) = undefined;
+        var created_local_visited: bool = false;
+        if (visited) |v| {
+            visited_ptr = v;
+        } else {
+            own_visited = .empty;
+            visited_ptr = &own_visited;
+            created_local_visited = true;
+        }
+        // (No global visited tracking here) — keep simple for now.
         var resolved = ResolvedFlake{
             .flake = flake,
             .inputs = std.StringHashMap(ResolvedFlake.ResolvedInput).init(self.allocator),
@@ -384,6 +453,9 @@ pub const FlakeEvaluator = struct {
             .allocator = self.allocator,
         };
         errdefer resolved.deinit();
+        if (created_local_visited) {
+            defer visited_ptr.deinit(self.allocator);
+        }
 
         const fetch_node = progress_node.start("Fetching inputs", flake.inputs.count());
         defer fetch_node.end();
@@ -408,7 +480,7 @@ pub const FlakeEvaluator = struct {
             }
 
             // Fetch the input
-            var fetch_result = self.fetcher.fetch(io, &ref, flake.path, fetch_node) catch |err| {
+            var fetch_result = self.fetcher.fetch(io, &ref, flake.path, fetch_node, self.allocator) catch |err| {
                 std.debug.print("Failed to fetch input '{s}': {}\n", .{ input_name, err });
                 fetch_node.completeOne();
                 continue;
@@ -435,16 +507,61 @@ pub const FlakeEvaluator = struct {
                 };
 
                 if (has_flake) {
-                    const input_flake = self.loadFlakeWithIo(io, fetch_result.path) catch null;
-                    if (input_flake) |fl| {
-                        const resolved_fl = try self.allocator.create(ResolvedFlake);
-                        // Pass down any overrides from the current flake for this sub-input
-                        const sub_overrides = flake.input_overrides.getPtr(input_name);
-                        resolved_fl.* = try self.resolveWithParent(io, fl, fetch_node, &resolved.inputs, sub_overrides);
+                    const sub_overrides = flake.input_overrides.getPtr(input_name);
 
-                        // Don't evaluate outputs yet - wait until after overrides are applied
+                    // If this source path is already in the visited set, avoid
+                    // recursing to prevent cycles. Try to reuse an existing
+                    // resolved flake from current or parent inputs instead.
+                    const is_visited = std.mem.eql(u8, fetch_result.path, flake.path);
+                    if (is_visited) {
+                        var reused: ?*ResolvedFlake = null;
+                        var piter2 = resolved.inputs.iterator();
+                        while (piter2.next()) |pentry2| {
+                            if (std.mem.eql(u8, pentry2.value_ptr.source_path, fetch_result.path)) {
+                                reused = pentry2.value_ptr.flake;
+                                break;
+                            }
+                        }
+                        if (reused) |r| {
+                            resolved_input.flake = r;
+                        } else if (parent_inputs) |pmap| {
+                            var piter = pmap.iterator();
+                            while (piter.next()) |pentry| {
+                                if (std.mem.eql(u8, pentry.value_ptr.source_path, fetch_result.path)) {
+                                    resolved_input.flake = pentry.value_ptr.flake;
+                                    break;
+                                }
+                            }
+                        } else {
+                            // No existing resolved flake found; skip recursion.
+                            resolved_input.flake = null;
+                        }
+                    } else {
+                        const input_flake = self.loadFlakeWithIo(io, fetch_result.path) catch null;
+                        if (input_flake) |fl| {
+                            if (parent_inputs) |pmap| {
+                                var piter = pmap.iterator();
+                                var reused: ?*ResolvedFlake = null;
+                                while (piter.next()) |pentry| {
+                                    if (std.mem.eql(u8, pentry.value_ptr.source_path, fetch_result.path)) {
+                                        reused = pentry.value_ptr.flake;
+                                        break;
+                                    }
+                                }
 
-                        resolved_input.flake = resolved_fl;
+                                if (reused) |r| {
+                                    resolved_input.flake = r;
+                                } else {
+                                    const resolved_fl = try self.allocator.create(ResolvedFlake);
+                                    resolved_fl.* = try self.resolveWithParent(io, fl, fetch_node, &resolved.inputs, sub_overrides, depth + 1, visited_ptr);
+                                    resolved_input.flake = resolved_fl;
+                                }
+                            } else {
+                                const resolved_fl = try self.allocator.create(ResolvedFlake);
+                                resolved_fl.* = try self.resolveWithParent(io, fl, fetch_node, &resolved.inputs, sub_overrides, depth + 1, visited_ptr);
+                                resolved_input.flake = resolved_fl;
+                            }
+                        }
                     }
                 }
             }
@@ -528,7 +645,6 @@ pub const FlakeEvaluator = struct {
 
         return resolved;
     }
-
     /// Resolve a follows path to find the target resolved input
     fn resolveFollows(
         self: *FlakeEvaluator,
@@ -572,7 +688,7 @@ pub const FlakeEvaluator = struct {
         var inputs_env = try self.evaluator.createEnv(self.evaluator.global_env);
 
         // Add self
-        const eval_alloc = self.evaluator.allocator;
+        const eval_alloc = self.evaluator.alloc();
         var self_attrs = std.StringHashMap(Value).init(eval_alloc);
         try self_attrs.put("outPath", Value{ .path = resolved.flake.path });
         try inputs_env.define("self", Value{ .attrs = .{ .bindings = self_attrs } });
@@ -643,7 +759,7 @@ pub const FlakeEvaluator = struct {
     }
 
     fn buildInputsValue(self: *FlakeEvaluator, resolved: *ResolvedFlake) !Value {
-        const eval_alloc = self.evaluator.allocator;
+        const eval_alloc = self.evaluator.alloc();
         var inputs_attrs = std.StringHashMap(Value).init(eval_alloc);
 
         // Add self
@@ -705,12 +821,12 @@ pub const FlakeEvaluator = struct {
     /// Build a package from the flake
     pub fn build(self: *FlakeEvaluator, io: std.Io, flake_ref: []const u8, attr_path: []const u8) ![]const u8 {
         // Parse the flake reference (e.g., "." or "github:NixOS/nixpkgs")
-        var ref = try FlakeRef.parse(self.allocator, flake_ref);
+        var ref = try FlakeRef.parse(self.parent_allocator, flake_ref);
         defer ref.deinit();
 
-        // Resolve the path
-        const flake_path = try ref.resolve(self.allocator, ".");
-        defer self.allocator.free(flake_path);
+        // Resolve the path (use parent allocator for temporary ref resolution)
+        const flake_path = try ref.resolve(self.parent_allocator, ".");
+        defer self.parent_allocator.free(flake_path);
 
         // Load the flake
         const fl = try self.loadFlakeWithIo(io, flake_path);
