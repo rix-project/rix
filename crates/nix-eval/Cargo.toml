@@ -1,0 +1,15 @@
+[package]
+name = "nix-eval"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nix-parser = { path = "../nix-parser" }
+rayon = { workspace = true }
+rootcause = { workspace = true }
+derive_more = { workspace = true }
+parking_lot = "0.12"
+dashmap = "6.1"                         # Concurrent map for environment/sets?
+
+[lints]
+workspace = true

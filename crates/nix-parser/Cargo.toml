@@ -1,0 +1,13 @@
+[package]
+name = "nix-parser"
+edition = "2024"
+version = "0.1.0"
+
+
+[dependencies]
+rootcause = { workspace = true }
+derive_more = { workspace = true }
+winnow = { workspace = true }
+
+[lints]
+workspace = true

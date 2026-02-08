@@ -52,3 +52,4 @@ flake-regressions
 
 # direnv
 .direnv/
+target/
