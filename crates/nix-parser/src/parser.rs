@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::ast::{Binding, Entry, Expr, Pattern};
 use derive_more::Display;
 use rootcause::Report;
@@ -11,8 +13,8 @@ use winnow::{
 
 #[derive(Debug, Display)]
 pub enum ParseError {
-    #[display("Invalid syntax at offset {_0}:\n{_1}")]
-    SyntaxError(usize, String),
+    #[display("Invalid syntax at offset {_0:?}:\n{_1}")]
+    SyntaxError(Range<usize>, String),
     #[display("Unexpected character: {_0}")]
     UnexpectedChar(char),
     #[display("Expected {_0}")]
@@ -23,7 +25,7 @@ impl std::error::Error for ParseError {}
 
 impl From<String> for ParseError {
     fn from(s: String) -> Self {
-        ParseError::SyntaxError(0, s)
+        ParseError::SyntaxError(0..s.len() - 1, s)
     }
 }
 
@@ -33,16 +35,18 @@ pub fn parse(input: &str) -> Result<Expr<'_>, Report<ParseError>> {
     match expr.parse(input) {
         Ok(e) => Ok(e),
         Err(e) => {
-            let offset = e.offset();
+            let span = e.char_span();
             // Calculate line and column
             let (line_num, col_num): (usize, usize) =
-                input[..offset].chars().fold((1, 1), |(line, col), c| {
-                    if c == '\n' {
-                        (line + 1, 1)
-                    } else {
-                        (line, col + 1)
-                    }
-                });
+                input[span.start..span.end]
+                    .chars()
+                    .fold((1, 1), |(line, col), c| {
+                        if c == '\n' {
+                            (line + 1, 1)
+                        } else {
+                            (line, col + 1)
+                        }
+                    });
 
             // Get the line content
             let lines: Vec<&str> = input.lines().collect();
@@ -59,7 +63,7 @@ pub fn parse(input: &str) -> Result<Expr<'_>, Report<ParseError>> {
             let context = format!("{line_prefix}{line_content}\n{pointer_prefix}{pad}^");
             let msg = format!("{e}\n{context}");
 
-            Err(Report::new(ParseError::SyntaxError(offset, msg)))
+            Err(Report::new(ParseError::SyntaxError(span, msg)))
         }
     }
 }
@@ -72,7 +76,6 @@ where
 }
 
 fn expr<'a>(input: &mut &'a str) -> PResult<'a, Expr<'a>> {
-    let _ = multispace0(input)?;
     alt((let_expr, if_expr, with_expr, assert_expr, lambda_or_app)).parse_next(input)
 }
 
