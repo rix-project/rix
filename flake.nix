@@ -1,8 +1,8 @@
 {
   description = "The purely functional package manager";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.zig-flake.url = "github:zix-os/zig-flake/push-pzkukzsswxwz";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs";
+  inputs.zig-flake.url = "github:zix-os/zig-flake";
 
   outputs =
     {
@@ -39,14 +39,8 @@
           default = mkShell {
             nativeBuildInputs = [
               zig
-              zon2nix
-              # TODO: zon2nix fails to build w/ zls???
-              #zls
+              zls
             ];
-
-            shellHook = ''
-              export ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig
-            '';
           };
         }
       );

@@ -4,6 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const use_llvm = b.option(bool, "use-llvm", "Use llvm and lld") orelse false;
+
     // Main executable
     const exe = b.addExecutable(.{
         .name = "zix",
@@ -12,6 +14,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .use_lld = use_llvm,
+        .use_llvm = use_llvm,
     });
     // Large stack for deep Nix evaluation (recursive let bindings, imports)
     exe.stack_size = 128 * 1024 * 1024; // 128 MB
@@ -53,6 +57,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/parser.zig"),
             .target = target,
         }),
+        .use_lld = use_llvm,
+        .use_llvm = use_llvm,
     });
     const run_parser_tests = b.addRunArtifact(parser_tests);
     test_step.dependOn(&run_parser_tests.step);
@@ -63,6 +69,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/eval.zig"),
             .target = target,
         }),
+        .use_lld = use_llvm,
+        .use_llvm = use_llvm,
     });
     const run_eval_tests = b.addRunArtifact(eval_tests);
     test_step.dependOn(&run_eval_tests.step);
@@ -73,6 +81,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/store.zig"),
             .target = target,
         }),
+        .use_lld = use_llvm,
+        .use_llvm = use_llvm,
     });
     const run_store_tests = b.addRunArtifact(store_tests);
     test_step.dependOn(&run_store_tests.step);
@@ -83,6 +93,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/flakeref.zig"),
             .target = target,
         }),
+        .use_lld = use_llvm,
+        .use_llvm = use_llvm,
     });
     const run_flakeref_tests = b.addRunArtifact(flakeref_tests);
     test_step.dependOn(&run_flakeref_tests.step);
@@ -93,6 +105,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/lockfile.zig"),
             .target = target,
         }),
+        .use_lld = use_llvm,
+        .use_llvm = use_llvm,
     });
     const run_lockfile_tests = b.addRunArtifact(lockfile_tests);
     test_step.dependOn(&run_lockfile_tests.step);
@@ -103,6 +117,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/flake.zig"),
             .target = target,
         }),
+        .use_lld = use_llvm,
+        .use_llvm = use_llvm,
     });
     const run_flake_tests = b.addRunArtifact(flake_tests);
     test_step.dependOn(&run_flake_tests.step);
