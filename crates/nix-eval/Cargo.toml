@@ -8,8 +8,8 @@ nix-parser = { path = "../nix-parser" }
 rayon = { workspace = true }
 rootcause = { workspace = true }
 derive_more = { workspace = true }
-parking_lot = "0.12"
-dashmap = "6.1"                         # Concurrent map for environment/sets?
+cranelift = { workspace = true }
+parking_lot = { workspace = true }
 
 [lints]
 workspace = true

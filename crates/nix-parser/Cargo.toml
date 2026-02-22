@@ -8,6 +8,11 @@ version = "0.1.0"
 rootcause = { workspace = true }
 derive_more = { workspace = true }
 winnow = { workspace = true }
+lalrpop-util = { workspace = true }
+logos = { workspace = true }
+
+[build-dependencies]
+lalrpop = { workspace = true }
 
 [lints]
 workspace = true

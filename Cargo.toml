@@ -25,6 +25,11 @@ winnow = { version = "0.7.14", default-features = false, features = [
 ] }
 rayon = { version = "1.11.0" }
 clap = { version = "4.5.57", features = ["derive"] }
+lalrpop-util = { version = "0.23.0", default-features = false, features = ["lexer", "unicode"] }
+lalrpop = "0.23.0"
+logos = "0.16.1"
+cranelift = { version = "0.128.3", features = ["interpreter", "jit", "module", "native", "object"] }
+parking_lot = "0.12.5"
 
 [profile.release]
 lto = "thin"

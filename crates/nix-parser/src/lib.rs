@@ -1,5 +1,14 @@
-pub mod ast;
-pub mod parser;
+use lalrpop_util::lalrpop_mod;
 
-pub use ast::*;
-pub use parser::{ParseError, parse};
+mod ast;
+mod lexer;
+
+lalrpop_mod!(
+    #[allow(clippy::ptr_arg)]
+    #[rustfmt::skip]
+    nix
+);
+
+pub use ast::{BinOp, Binding, Expr, PrefixOp};
+pub use lexer::{Lexer, Spanned, Token};
+pub use nix::ExprParser;

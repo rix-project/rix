@@ -1,0 +1,121 @@
+use crate::ast::{Expr, Binding, BinOp, PrefixOp};
+use crate::lexer::Token;
+
+grammar;
+
+// Inform LALRPOP about our custom Logos lexer
+extern {
+    type Location = usize;
+    type Error = String;
+
+    enum Token {
+        "let" => Token::Let,
+        "in" => Token::In,
+        "if" => Token::If,
+        "then" => Token::Then,
+        "else" => Token::Else,
+        "true" => Token::True,
+        "false" => Token::False,
+        "null" => Token::Null,
+        "ident" => Token::Ident(<String>),
+        "int" => Token::Int(<i64>),
+        "string" => Token::Str(<String>),
+        "path" => Token::Path(<String>),
+        "{" => Token::LBrace,
+        "}" => Token::RBrace,
+        "[" => Token::LBracket,
+        "]" => Token::RBracket,
+        "(" => Token::LParen,
+        ")" => Token::RParen,
+        ";" => Token::Semi,
+        ":" => Token::Colon,
+        "." => Token::Dot,
+        "=" => Token::Assign,
+        "==" => Token::Eq,
+        "!=" => Token::Neq,
+        "&&" => Token::And,
+        "||" => Token::Or,
+        "!" => Token::Not,
+        "+" => Token::Plus,
+        "-" => Token::Minus,
+        "*" => Token::Star,
+        "/" => Token::Slash,
+        "//" => Token::Update,
+    }
+}
+
+// Lowest Precedence
+pub Expr: Box<Expr> = {
+    // Right-associative lambda: x: y: x + y
+    <l:Ident> ":" <e:Expr> => Box::new(Expr::Lambda(l, e)),
+    "let" <bindings:Binding*> "in" <e:Expr> => Box::new(Expr::LetIn(bindings, e)),
+    "if" <cond:Expr> "then" <t:Expr> "else" <f:Expr> => Box::new(Expr::IfThenElse(cond, t, f)),
+    Expr1,
+};
+
+Expr1: Box<Expr> = {
+    <l:Expr1> "||" <r:Expr2> => Box::new(Expr::BinOp(l, BinOp::Or, r)),
+    Expr2,
+};
+
+Expr2: Box<Expr> = {
+    <l:Expr2> "&&" <r:Expr3> => Box::new(Expr::BinOp(l, BinOp::And, r)),
+    Expr3,
+};
+
+Expr3: Box<Expr> = {
+    <l:Expr3> "==" <r:Expr4> => Box::new(Expr::BinOp(l, BinOp::Eq, r)),
+    <l:Expr3> "!=" <r:Expr4> => Box::new(Expr::BinOp(l, BinOp::Neq, r)),
+    Expr4,
+};
+
+Expr4: Box<Expr> = {
+    <l:Expr4> "//" <r:Expr5> => Box::new(Expr::BinOp(l, BinOp::Update, r)),
+    Expr5,
+};
+
+Expr5: Box<Expr> = {
+    <l:Expr5> "+" <r:Expr6> => Box::new(Expr::BinOp(l, BinOp::Add, r)),
+    <l:Expr5> "-" <r:Expr6> => Box::new(Expr::BinOp(l, BinOp::Sub, r)),
+    Expr6,
+};
+
+Expr6: Box<Expr> = {
+    <l:Expr6> "*" <r:Expr7> => Box::new(Expr::BinOp(l, BinOp::Mul, r)),
+    <l:Expr6> "/" <r:Expr7> => Box::new(Expr::BinOp(l, BinOp::Div, r)),
+    Expr7,
+};
+
+Expr7: Box<Expr> = {
+    "!" <e:Expr7> => Box::new(Expr::Prefix(PrefixOp::Not, e)),
+    "-" <e:Expr7> => Box::new(Expr::Prefix(PrefixOp::Neg, e)),
+    Expr8,
+};
+
+// Left-associative function application: f x y -> (f x) y
+Expr8: Box<Expr> = {
+    <l:Expr8> <r:Term> => Box::new(Expr::Apply(l, r)),
+    Term,
+};
+
+// Highest Precedence (Atoms / Parentheses)
+Term: Box<Expr> = {
+    "ident" => Box::new(Expr::Ident(<>)),
+    "int" => Box::new(Expr::Int(<>)),
+    "string" => Box::new(Expr::String(<>)),
+    "path" => Box::new(Expr::Path(<>)),
+    "true" => Box::new(Expr::Bool(true)),
+    "false" => Box::new(Expr::Bool(false)),
+    "null" => Box::new(Expr::Null),
+    "{" <bindings:Binding*> "}" => Box::new(Expr::AttrSet(bindings)),
+    // Nix lists don't use commas
+    "[" <items:Term*> "]" => Box::new(Expr::List(items)),
+    "(" <e:Expr> ")" => e,
+};
+
+Ident: String = "ident" => <>;
+
+// e.g., myVar = 42;
+Binding: Binding = {
+    <name:Ident> "=" <value:Expr> ";" => Binding { name, value }
+};
