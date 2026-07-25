@@ -111,7 +111,7 @@ pub const Lexer = struct {
             .string_depth = 0,
             .brace_depth = 0,
             .allocated_strings = .empty,
-            .indented_string_stack = @as([max_string_depth]bool, @splat(false)), 
+            .indented_string_stack = @as([max_string_depth]bool, @splat(false)),
         };
     }
 

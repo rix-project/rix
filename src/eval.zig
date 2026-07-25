@@ -801,7 +801,7 @@ pub const Evaluator = struct {
 
     pub fn equal(self: *Self, lval: Value, rval: Value) !bool {
         _ = self;
-        if (@intFromEnum(lval) != @intFromEnum(rval)) return false;
+        if (@backingInt(lval) != @backingInt(rval)) return false;
 
         return switch (lval) {
             .int => lval.int == rval.int,

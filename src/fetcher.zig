@@ -1,6 +1,7 @@
 const std = @import("std");
 const FlakeRef = @import("flakeref.zig").FlakeRef;
 const http = @import("http.zig");
+const git = @import("vendor/git.zig");
 
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -60,17 +61,29 @@ pub const Fetcher = struct {
         };
     }
 
+    /// Fetch a plain git repository using the vendored git wire-protocol
+    /// client (`vendor/git.zig`, taken from the Zig compiler's package
+    /// fetcher). Performs a shallow (depth 1) fetch of the requested ref
+    /// or the default branch, then checks the tree out into the cache.
     fn fetchGit(self: *Fetcher, io: Io, ref: *const FlakeRef, out_alloc: std.mem.Allocator) !FetchResult {
-        _ = io;
-        // Git is stubbed - will use git.zig from Zig compiler sources
         const url_hash = std.hash.Wyhash.hash(0, ref.url);
+        const want_ref = ref.rev orelse ref.ref orelse "HEAD";
         const cache_path = try std.fmt.allocPrint(
             self.allocator,
             "{s}/git/{x}",
             .{ self.cache_dir, url_hash },
         );
-        std.debug.print("TODO: fetchGit for {s} (stubbed - will use git.zig)\n", .{ref.url});
-        // copy cache_path into caller allocator for return
+        defer self.allocator.free(cache_path);
+
+        const already_cached = Dir.statFile(.cwd(), io, cache_path, .{}) catch null;
+        if (already_cached == null) {
+            try Dir.createDirPath(.cwd(), io, self.cache_dir);
+            gitClone(self.allocator, io, ref.url, want_ref, cache_path) catch |err| {
+                std.debug.print("git fetch failed for {s} ({s}): {s}\n", .{ ref.url, want_ref, @errorName(err) });
+                return err;
+            };
+        }
+
         const returned = try out_alloc.dupe(u8, cache_path);
         return FetchResult{
             .path = returned,
@@ -349,3 +362,118 @@ pub const Fetcher = struct {
         };
     }
 };
+
+/// Clone (shallow, depth 1) a git repository over HTTP(S) using the git
+/// wire protocol v2, writing the checked-out worktree to `dest_dir`.
+///
+/// This is a thin driver over the vendored `vendor/git.zig` module (sourced
+/// from the Zig compiler's package fetcher, which implements the smart
+/// HTTP protocol, packfile indexing, and tree checkout using only
+/// `std.http.Client` and `std.Io`).
+fn gitClone(
+    allocator: std.mem.Allocator,
+    io: Io,
+    url: []const u8,
+    want_ref: []const u8,
+    dest_dir: []const u8,
+) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const uri = try std.Uri.parse(url);
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+
+    var session_buf: [git.Packet.max_data_length]u8 = undefined;
+    var session = try git.Session.init(arena, &client, uri, &session_buf);
+
+    // Resolve `want_ref` (a rev, branch, or tag) to a concrete OID by
+    // listing refs and matching against known ref name forms. If it already
+    // looks like a raw OID, use it directly as a "want" line.
+    const want_oid_str = resolve_ref: {
+        if (git.Oid.parseAny(want_ref)) |_| {
+            break :resolve_ref try arena.dupe(u8, want_ref);
+        } else |_| {}
+
+        var ref_it: git.Session.RefIterator = undefined;
+        var list_buf: [git.Packet.max_data_length]u8 = undefined;
+        try session.listRefs(&ref_it, .{
+            .ref_prefixes = &.{ "refs/heads/", "refs/tags/" },
+            .buffer = &list_buf,
+        });
+        defer ref_it.deinit();
+
+        var found: ?[]u8 = null;
+        while (try ref_it.next()) |r| {
+            if (std.mem.eql(u8, r.name, want_ref) or std.mem.endsWith(u8, r.name, want_ref)) {
+                var buf: [git.Oid.max_formatted_length]u8 = undefined;
+                const s = try std.fmt.bufPrint(&buf, "{f}", .{r.oid});
+                found = try arena.dupe(u8, s);
+            }
+            if (std.mem.eql(u8, want_ref, "HEAD") and r.symref_target != null) {
+                var buf: [git.Oid.max_formatted_length]u8 = undefined;
+                const s = try std.fmt.bufPrint(&buf, "{f}", .{r.oid});
+                found = try arena.dupe(u8, s);
+            }
+        }
+        break :resolve_ref found orelse return error.RefNotFound;
+    };
+
+    const oid = try git.Oid.parse(session.object_format, want_oid_str);
+
+    var fetch_stream: git.Session.FetchStream = undefined;
+    var fetch_buf: [git.Packet.max_data_length]u8 = undefined;
+    try session.fetch(&fetch_stream, &.{want_oid_str}, &fetch_buf);
+    defer fetch_stream.deinit();
+
+    // Write the received packfile to a temporary file, then index it.
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}-fetch-tmp", .{dest_dir});
+    defer allocator.free(tmp_path);
+    var tmp_dir = try Dir.createDirPathOpen(.cwd(), io, tmp_path, .{});
+    var made_dir = true;
+    errdefer if (made_dir) Dir.deleteTree(.cwd(), io, tmp_path) catch {};
+
+    var pack_file = try tmp_dir.createFile(io, "pack", .{ .read = true });
+    defer pack_file.close(io);
+    {
+        var write_buf: [65536]u8 = undefined;
+        var pack_writer = pack_file.writer(io, &write_buf);
+        _ = try fetch_stream.reader.streamRemaining(&pack_writer.interface);
+        try pack_writer.interface.flush();
+    }
+
+    var pack_read_buf: [65536]u8 = undefined;
+    var pack_reader = pack_file.reader(io, &pack_read_buf);
+
+    var index_file = try tmp_dir.createFile(io, "idx", .{ .read = true });
+    defer index_file.close(io);
+    {
+        var idx_write_buf: [65536]u8 = undefined;
+        var idx_writer = index_file.writer(io, &idx_write_buf);
+        try git.indexPack(allocator, session.object_format, &pack_reader, &idx_writer);
+    }
+
+    var idx_read_buf: [65536]u8 = undefined;
+    var idx_reader = index_file.reader(io, &idx_read_buf);
+
+    var repository: git.Repository = undefined;
+    try repository.init(allocator, session.object_format, &pack_reader, &idx_reader);
+    defer repository.deinit();
+
+    var worktree = try Dir.createDirPathOpen(.cwd(), io, dest_dir, .{});
+    defer worktree.close(io);
+
+    var diagnostics: git.Diagnostics = .{ .allocator = allocator };
+    defer diagnostics.deinit();
+    try repository.checkout(io, worktree, oid, &diagnostics);
+
+    tmp_dir.close(io);
+    Dir.deleteTree(.cwd(), io, tmp_path) catch {};
+    made_dir = false;
+
+    if (diagnostics.errors.items.len > 0) {
+        std.debug.print("git checkout produced {d} diagnostics for {s}\n", .{ diagnostics.errors.items.len, url });
+    }
+}

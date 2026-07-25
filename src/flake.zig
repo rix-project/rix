@@ -77,15 +77,23 @@ pub const ResolvedFlake = struct {
         flake: ?*ResolvedFlake,
         source_path: []const u8,
         rev: ?[]const u8,
+        /// Whether this input owns `flake` and is responsible for freeing
+        /// it. Follows-resolution and dedup logic frequently alias the same
+        /// `*ResolvedFlake` from multiple `ResolvedInput`s (e.g. a `follows`
+        /// input pointing at an already-resolved sibling, or cycle/dedup
+        /// reuse); only the original owner may destroy the pointer.
+        owns_flake: bool = false,
     };
 
     pub fn deinit(self: *ResolvedFlake) void {
         self.flake.deinit();
         var iter = self.inputs.iterator();
         while (iter.next()) |entry| {
-            if (entry.value_ptr.flake) |f| {
-                f.deinit();
-                self.allocator.destroy(f);
+            if (entry.value_ptr.owns_flake) {
+                if (entry.value_ptr.flake) |f| {
+                    f.deinit();
+                    self.allocator.destroy(f);
+                }
             }
             self.allocator.free(entry.value_ptr.source_path);
             if (entry.value_ptr.rev) |r| self.allocator.free(r);
@@ -512,11 +520,13 @@ pub const FlakeEvaluator = struct {
                         }
                         if (reused) |r| {
                             resolved_input.flake = r;
+                            resolved_input.owns_flake = false;
                         } else if (parent_inputs) |pmap| {
                             var piter = pmap.iterator();
                             while (piter.next()) |pentry| {
                                 if (std.mem.eql(u8, pentry.value_ptr.source_path, fetch_result.path)) {
                                     resolved_input.flake = pentry.value_ptr.flake;
+                                    resolved_input.owns_flake = false;
                                     break;
                                 }
                             }
@@ -539,15 +549,18 @@ pub const FlakeEvaluator = struct {
 
                                 if (reused) |r| {
                                     resolved_input.flake = r;
+                                    resolved_input.owns_flake = false;
                                 } else {
                                     const resolved_fl = try self.allocator.create(ResolvedFlake);
                                     resolved_fl.* = try self.resolveWithParent(io, fl, fetch_node, &resolved.inputs, sub_overrides, depth + 1, visited_ptr);
                                     resolved_input.flake = resolved_fl;
+                                    resolved_input.owns_flake = true;
                                 }
                             } else {
                                 const resolved_fl = try self.allocator.create(ResolvedFlake);
                                 resolved_fl.* = try self.resolveWithParent(io, fl, fetch_node, &resolved.inputs, sub_overrides, depth + 1, visited_ptr);
                                 resolved_input.flake = resolved_fl;
+                                resolved_input.owns_flake = true;
                             }
                         }
                     }

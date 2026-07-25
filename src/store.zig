@@ -239,7 +239,6 @@ pub const Store = struct {
         }
     }
 
-
     /// Check if a store path exists on disk under this store's root.
     pub fn isValidPath(self: *Store, io: std.Io, path: []const u8) bool {
         _ = self;

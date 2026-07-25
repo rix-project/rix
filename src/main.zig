@@ -40,8 +40,19 @@ pub fn main(init: std.process.Init) !void {
                     mode = .flake_metadata;
                 } else if (std.mem.eql(u8, flake_cmd, "lock")) {
                     mode = .flake_lock;
+                } else if (!std.mem.startsWith(u8, flake_cmd, "-")) {
+                    // `zix flake <path>` defaults to show
+                    mode = .flake_show;
+                    input_file = flake_cmd;
                 }
+            } else {
+                mode = .flake_show;
             }
+        } else if (std.mem.eql(u8, first_arg, "show")) {
+            // Alias for `flake show`, e.g. `zix show .#`
+            mode = .flake_show;
+        } else if (std.mem.eql(u8, first_arg, "metadata")) {
+            mode = .flake_metadata;
         } else if (std.mem.eql(u8, first_arg, "eval")) {
             mode = .eval;
         } else if (std.mem.eql(u8, first_arg, "--expr")) {
