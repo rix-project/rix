@@ -181,6 +181,11 @@ pub const Parser = struct {
                 }
                 return Expr{ .path = val };
             },
+            .spath => {
+                const val = self.current.value.path;
+                self.advance();
+                return Expr{ .search_path = val };
+            },
             .uri => {
                 const val = self.current.value.uri;
                 self.advance();
@@ -301,7 +306,7 @@ pub const Parser = struct {
                 .dot => {
                     expr = try self.parseSelect(expr);
                 },
-                .lparen, .lbrace, .lbracket, .integer, .float, .string, .path, .identifier, .kw_rec => {
+                .lparen, .lbrace, .lbracket, .integer, .float, .string, .path, .spath, .identifier, .kw_rec => {
                     // Function application - use parseSimple for args so that
                     // `.` select binds tighter than application (f x.a = f (x.a))
                     // and application is left-associative (f x y = (f x) y)

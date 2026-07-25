@@ -8,6 +8,7 @@ pub const TokenKind = enum {
     string_part, // Part of an interpolated string before ${
     string_end, // Final part of an interpolated string
     path,
+    spath, // NIX_PATH search path, e.g. `<nixpkgs>` or `<nixpkgs/pkgs>`
     uri,
     identifier,
 
@@ -276,6 +277,7 @@ pub const Lexer = struct {
         if (std.ascii.isDigit(ch)) return try self.lexNumber(token_line, token_column, token_start);
         if (std.ascii.isAlphabetic(ch) or ch == '_') return try self.lexIdentifier(token_line, token_column, token_start);
         if ((ch == '.' or ch == '/') and (try self.isPathStart())) return try self.lexPath(token_line, token_column, token_start);
+        if (ch == '<' and (try self.isSearchPathStart())) return try self.lexSearchPath(token_line, token_column, token_start);
         if (std.ascii.isAlphabetic(ch) and (try self.isUriStart())) return try self.lexUri(token_line, token_column, token_start);
 
         const next = try self.peekAhead();
@@ -724,6 +726,46 @@ pub const Lexer = struct {
             return nxt == '/' or nxt == '.';
         }
         return false;
+    }
+
+    /// Detects a NIX_PATH search-path literal, e.g. `<nixpkgs>` or
+    /// `<nixpkgs/pkgs>`: `<` followed by one or more path-ish characters
+    /// and a closing `>`, with no whitespace in between (distinguishing it
+    /// from `<`/`<=` comparison operators).
+    fn isSearchPathStart(self: *Self) !bool {
+        const max_len = 200;
+        const buf = try self.peekSlice(max_len);
+        if (buf.len < 3) return false; // need at least `<x>`
+        var i: usize = 1;
+        var saw_ident_char = false;
+        while (i < buf.len) : (i += 1) {
+            const c = buf[i];
+            if (c == '>') return saw_ident_char;
+            if (std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.' or c == '/') {
+                saw_ident_char = true;
+                continue;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    fn lexSearchPath(self: *Self, line: usize, column: usize, start: usize) !Token {
+        self.advance(); // consume '<'
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        while (true) {
+            const ch = try self.currentByte() orelse break;
+            if (ch == '>') {
+                self.advance();
+                break;
+            }
+            try buf.append(self.allocator, ch);
+            self.advance();
+        }
+        const name = buf.items;
+        try self.allocated_strings.append(self.allocator, name);
+        return Token{ .kind = .spath, .value = .{ .path = name }, .line = line, .column = column, .offset = start };
     }
 
     fn isUriStart(self: *Self) !bool {

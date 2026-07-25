@@ -259,6 +259,17 @@ pub const Evaluator = struct {
                 return Value{ .string = try result.toOwnedSlice(self.alloc()) };
             },
             .path => |p| return Value{ .path = p },
+            .search_path => {
+                // NIX_PATH search-path literals (`<nixpkgs>`, etc.) require
+                // consulting the `NIX_PATH` environment variable / configured
+                // `nix-path` search entries, which we intentionally don't
+                // resolve (equivalent to running with an empty NIX_PATH /
+                // `--pure-eval`). Real-world flakes almost always guard use
+                // of these behind `builtins.tryEval`/`builtins.pathExists`
+                // (as nixpkgs itself does), so failing here is caught
+                // gracefully rather than crashing evaluation.
+                return error.SearchPathNotFound;
+            },
             .uri => |u| return Value{ .string = u },
 
             .var_ref => |name| {

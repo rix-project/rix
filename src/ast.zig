@@ -13,6 +13,9 @@ pub const Expr = union(enum) {
     string: []const u8,
     interpolated_string: InterpolatedString,
     path: []const u8,
+    /// NIX_PATH search-path literal, e.g. `<nixpkgs>` (stores just the
+    /// inner name/subpath, without the angle brackets).
+    search_path: []const u8,
     uri: []const u8,
     var_ref: []const u8,
     list: List,
@@ -183,6 +186,7 @@ pub const Expr = union(enum) {
             },
             // Paths, URIs, var_refs are slices into source, don't free
             .path => {},
+            .search_path => {},
             .uri => {},
             .var_ref => {},
             .list => |l| {
@@ -333,6 +337,7 @@ pub const Expr = union(enum) {
                 try writer.writeAll(")\n");
             },
             .path => |p| try writer.print("Path({s})\n", .{p}),
+            .search_path => |p| try writer.print("SearchPath(<{s}>)\n", .{p}),
             .uri => |u| try writer.print("Uri({s})\n", .{u}),
             .var_ref => |v| try writer.print("Var({s})\n", .{v}),
             .list => |l| {
