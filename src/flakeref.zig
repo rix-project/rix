@@ -55,24 +55,31 @@ pub const FlakeRef = struct {
             return ref;
         }
 
-        // github:owner/repo[/ref][?rev=...]
+        // github:owner/repo[/...][?rev=...&ref=...&dir=...]
         if (std.mem.startsWith(u8, input, "github:")) {
             ref.type = .github;
-            const rest = input["github:".len..];
+            var rest = input["github:".len..];
 
-            // Parse owner/repo
+            // Split off query string first, if present
+            var query: ?[]const u8 = null;
+            if (std.mem.indexOf(u8, rest, "?")) |q_idx| {
+                query = rest[q_idx + 1 ..];
+                rest = rest[0..q_idx];
+            }
+
+            // Parse owner and repo
             var parts = std.mem.splitScalar(u8, rest, '/');
             const owner = parts.next() orelse return error.InvalidFlakeRef;
-            const repo_and_rest = parts.next() orelse return error.InvalidFlakeRef;
+            const repo = parts.next() orelse return error.InvalidFlakeRef;
 
-            // Check for query params
-            if (std.mem.indexOf(u8, repo_and_rest, "?")) |q_idx| {
-                const repo = repo_and_rest[0..q_idx];
-                ref.url = try std.fmt.allocPrint(allocator, "https://github.com/{s}/{s}", .{ owner, repo });
+            // Remaining path components (if any) are part of the ref/dir
+            const remaining = parts.rest();
+            if (remaining.len > 0) {
+                ref.ref = try allocator.dupe(u8, remaining);
+            }
 
-                // Parse query params
-                const query = repo_and_rest[q_idx + 1 ..];
-                var params = std.mem.splitScalar(u8, query, '&');
+            if (query) |q| {
+                var params = std.mem.splitScalar(u8, q, '&');
                 while (params.next()) |param| {
                     if (std.mem.indexOf(u8, param, "=")) |eq_idx| {
                         const key = param[0..eq_idx];
@@ -86,15 +93,10 @@ pub const FlakeRef = struct {
                         }
                     }
                 }
-            } else {
-                // Maybe has ref as third path component
-                if (parts.next()) |maybe_ref| {
-                    ref.ref = try allocator.dupe(u8, maybe_ref);
-                    ref.url = try std.fmt.allocPrint(allocator, "https://github.com/{s}/{s}", .{ owner, repo_and_rest });
-                } else {
-                    ref.url = try std.fmt.allocPrint(allocator, "https://github.com/{s}/{s}", .{ owner, repo_and_rest });
-                }
             }
+
+            // Base URL is just owner/repo
+            ref.url = try std.fmt.allocPrint(allocator, "https://github.com/{s}/{s}", .{ owner, repo });
             return ref;
         }
 

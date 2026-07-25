@@ -71,22 +71,23 @@ pub const LockFile = struct {
         };
     };
 
-    pub fn init(allocator: std.mem.Allocator) LockFile {
+    pub fn init(allocator: std.mem.Allocator) !LockFile {
         return LockFile{
             .version = 7,
-            .root = "root",
+            .root = try allocator.dupe(u8, "root"),
             .nodes = std.StringHashMap(LockFileNode).init(allocator),
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *LockFile) void {
+        self.allocator.free(self.root);
         self.nodes.deinit();
     }
 
     /// Parse a flake.lock file (JSON format)
     pub fn parse(allocator: std.mem.Allocator, content: []const u8) !LockFile {
-        var lock = LockFile.init(allocator);
+        var lock = try LockFile.init(allocator);
         errdefer lock.deinit();
 
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});
@@ -105,6 +106,7 @@ pub const LockFile = struct {
         // Root reference
         if (root.object.get("root")) |r| {
             if (r == .string) {
+                allocator.free(lock.root);
                 lock.root = try allocator.dupe(u8, r.string);
             }
         }

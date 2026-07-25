@@ -319,7 +319,7 @@ pkgs.nixComponents2.nix-util.overrideAttrs (
             pkgs.buildPackages.gnused
             modular.pre-commit.settings.package
             (pkgs.writeScriptBin "pre-commit-hooks-install" modular.pre-commit.settings.installationScript)
-            pkgs.buildPackages.nixfmt-rfc-style
+            pkgs.buildPackages.nixfmt
             pkgs.buildPackages.shellcheck
             pkgs.buildPackages.include-what-you-use
           ]
