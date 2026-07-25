@@ -609,7 +609,6 @@ pub const Lexer = struct {
 
     fn lexIdentifier(self: *Self, line: usize, column: usize, start: usize) !Token {
         var id_buf: std.ArrayList(u8) = .empty;
-        // defer id_buf.deinit(self.allocator);
 
         while (true) {
             const ch = try self.currentByte() orelse break;
@@ -626,6 +625,7 @@ pub const Lexer = struct {
             try self.allocated_strings.append(self.allocator, id_buf.items);
             return Token{ .kind = .identifier, .value = .{ .identifier = id_buf.items }, .line = line, .column = column, .offset = start };
         }
+        id_buf.deinit(self.allocator);
         return Token{ .kind = kind, .value = .none, .line = line, .column = column, .offset = start };
     }
 
