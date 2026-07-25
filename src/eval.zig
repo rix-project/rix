@@ -424,13 +424,21 @@ pub const Evaluator = struct {
                             };
                         }
 
-                        // Have all args - force them and call the function
+                        // Have all args - force them and call the function.
+                        //
+                        // `tryEval` is special-cased to receive its argument
+                        // unforced: its entire purpose is to catch errors
+                        // that occur while forcing a (possibly failing)
+                        // expression, which requires doing that forcing
+                        // itself, inside its own try/catch (see
+                        // `builtinTryEval`).
                         const args = try self.alloc().alloc(Value, total_args);
                         @memcpy(args[0..prev_args.len], prev_args);
                         args[prev_args.len] = arg;
-                        // Force all args before passing to builtin
-                        for (args) |*a| {
-                            a.* = try self.force(a.*);
+                        if (!std.mem.eql(u8, b.name, "tryEval")) {
+                            for (args) |*a| {
+                                a.* = try self.force(a.*);
+                            }
                         }
                         return try b.func(self, self.io, self.alloc(), args);
                     },
@@ -798,8 +806,12 @@ pub const Evaluator = struct {
                 const args = try self.alloc().alloc(Value, total_args);
                 @memcpy(args[0..prev_args.len], prev_args);
                 args[prev_args.len] = arg;
-                for (args) |*a| {
-                    a.* = try self.force(a.*);
+                // See the matching comment in the `.call` handling of
+                // `evalInEnv`: `tryEval` needs its argument unforced.
+                if (!std.mem.eql(u8, b.name, "tryEval")) {
+                    for (args) |*a| {
+                        a.* = try self.force(a.*);
+                    }
                 }
                 return try b.func(self, self.io, self.alloc(), args);
             },
