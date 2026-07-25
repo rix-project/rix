@@ -362,7 +362,13 @@ pub const Evaluator = struct {
             .call => |c| {
                 const raw_func = try self.evalInEnv(c.func.*, env);
                 const func = try self.force(raw_func);
-                const arg = try self.evalInEnv(c.arg.*, env);
+                // Nix function application is lazy: arguments are not
+                // evaluated until (if ever) the callee forces them. Wrap
+                // the argument expression in a thunk instead of evaluating
+                // it eagerly here, matching `let`/attrset binding laziness
+                // and, critically, allowing `builtins.tryEval`/`assert`-
+                // style callers to catch errors from unused/failing args.
+                const arg = Value{ .thunk = try self.createThunk(c.arg, env) };
 
                 switch (func) {
                     .lambda => |lam| {
