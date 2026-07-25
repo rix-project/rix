@@ -180,22 +180,13 @@ pub const FlakeEvaluator = struct {
             need_free = true;
         }
 
-        if (need_free) {
-            defer self.allocator.free(flake_path.?);
-        }
-
-        // Print flake path plus a simple checksum to detect corruption
-        var _sum: u32 = 0;
-        for (flake_path.?) |c| _sum += @as(u32, c);
-        std.debug.print("[loadFlakeWithIo] trying flake file: {s} (len={d} sum={d})\n", .{ flake_path.?, flake_path.?.len, _sum });
+        defer if (need_free) self.allocator.free(flake_path.?);
 
         var file_opt: ?std.Io.File = Dir.openFile(.cwd(), io, flake_path.?, .{}) catch null;
         if (file_opt == null) {
-            std.debug.print("[loadFlakeWithIo] open failed for {s} (len={d} sum={d})\n", .{ flake_path.?, flake_path.?.len, _sum });
             // Try a simple fallback: look for ./flake.nix in CWD
             const fallback = try std.fs.path.join(self.allocator, &.{ ".", "flake.nix" });
             defer self.allocator.free(fallback);
-            std.debug.print("[loadFlakeWithIo] trying fallback flake file: {s}\n", .{fallback});
             const fb = try Dir.openFile(.cwd(), io, fallback, .{});
             file_opt = fb;
         }
@@ -321,9 +312,6 @@ pub const FlakeEvaluator = struct {
             }
         }
         const owned = try result.toOwnedSlice(self.allocator);
-        var _sum: u32 = 0;
-        for (owned) |c| _sum += @as(u32, c);
-        std.debug.print("[attrPathToString] -> {s} (len={d} sum={d})\n", .{ owned, owned.len, _sum });
         return owned;
     }
 
@@ -890,7 +878,7 @@ pub const FlakeEvaluator = struct {
         }
 
         // Build using the store
-        return self.nix_store.buildDerivation(&drv);
+        return self.nix_store.buildDerivation(self.evaluator.io, &drv);
     }
 };
 

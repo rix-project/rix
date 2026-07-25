@@ -24,10 +24,6 @@ pub const Parser = struct {
         const current = try lex.nextToken();
         const peek = try lex.nextToken();
 
-        var _sum: usize = 0;
-        for (filename) |b| _sum += @as(usize, b);
-        std.debug.print("[Parser.init] filename: {s} (len={d} sum={d})\n", .{ filename, filename.len, _sum });
-
         return Self{
             .allocator = allocator,
             .lexer = lex,

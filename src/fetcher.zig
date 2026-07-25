@@ -27,7 +27,7 @@ pub const Fetcher = struct {
     pub fn init(allocator: std.mem.Allocator, io: Io) Fetcher {
         return .{
             .allocator = allocator,
-            .cache_dir = "/tmp/zix-cache",
+            .cache_dir = ".zix-cache",
             .http_fetcher = http.HttpFetcher.init(allocator, io),
         };
     }
@@ -51,9 +51,6 @@ pub const Fetcher = struct {
         const resolved = try ref.resolve(self.allocator, base_path);
         // Ensure returned path is owned by the caller allocator
         const path_copy = try out_alloc.dupe(u8, resolved);
-        var _sum_pp: u32 = 0;
-        for (path_copy) |c| _sum_pp += @as(u32, c);
-        std.debug.print("[fetcher] fetchPath -> path {s} (len={d} sum={d} ptr={*})\n", .{ path_copy, path_copy.len, _sum_pp, path_copy.ptr });
         return FetchResult{
             .path = path_copy,
             .rev = null,
@@ -75,9 +72,6 @@ pub const Fetcher = struct {
         std.debug.print("TODO: fetchGit for {s} (stubbed - will use git.zig)\n", .{ref.url});
         // copy cache_path into caller allocator for return
         const returned = try out_alloc.dupe(u8, cache_path);
-        var _sum: u32 = 0;
-        for (returned) |c| _sum += @as(u32, c);
-        std.debug.print("[fetcher] fetchGit -> path {s} (len={d} sum={d} ptr={*})\n", .{ returned, returned.len, _sum, returned.ptr });
         return FetchResult{
             .path = returned,
             .rev = if (ref.rev) |r| try out_alloc.dupe(u8, r) else null,
@@ -199,13 +193,7 @@ pub const Fetcher = struct {
 
         // copy the final cache_path into caller allocator for safe ownership
         const returned = try out_alloc.dupe(u8, cache_path);
-        var _sum: u32 = 0;
-        for (returned) |c| _sum += @as(u32, c);
-        std.debug.print("[fetcher] fetchGitHub -> path {s} (len={d} sum={d} ptr={*})\n", .{ returned, returned.len, _sum, returned.ptr });
         // Also log the original cached string allocated on fetcher allocator
-        var _sum_cache: u32 = 0;
-        for (cache_path) |c| _sum_cache += @as(u32, c);
-        std.debug.print("[fetcher] fetchGitHub cache_path produced on fetcher.alloc (len={d} sum={d} ptr={*})\n", .{ cache_path.len, _sum_cache, cache_path.ptr });
         return FetchResult{
             .path = returned,
             .rev = if (ref.rev) |r| try out_alloc.dupe(u8, r) else null,
@@ -289,9 +277,6 @@ pub const Fetcher = struct {
         };
 
         const returned = try out_alloc.dupe(u8, cache_path);
-        var _sum: u32 = 0;
-        for (returned) |c| _sum += @as(u32, c);
-        std.debug.print("[fetcher] fetchGitLab -> path {s} (len={d} sum={d})\n", .{ returned, returned.len, _sum });
         return FetchResult{
             .path = returned,
             .rev = if (ref.rev) |r| try out_alloc.dupe(u8, r) else null,
@@ -338,9 +323,6 @@ pub const Fetcher = struct {
                 // No subdirectory – the temp dir IS the content
                 try Dir.rename(.cwd(), extract_temp, .cwd(), cache_subdir, io);
                 const returned = try out_alloc.dupe(u8, cache_subdir);
-                var _sum: u32 = 0;
-                for (returned) |c| _sum += @as(u32, c);
-                std.debug.print("[fetcher] fetchTarball -> path {s} (len={d} sum={d})\n", .{ returned, returned.len, _sum });
                 return FetchResult{
                     .path = returned,
                     .rev = null,
@@ -358,9 +340,6 @@ pub const Fetcher = struct {
         };
 
         const returned = try out_alloc.dupe(u8, cache_subdir);
-        var _sum: u32 = 0;
-        for (returned) |c| _sum += @as(u32, c);
-        std.debug.print("[fetcher] fetchTarball -> path {s} (len={d} sum={d})\n", .{ returned, returned.len, _sum });
         return FetchResult{
             .path = returned,
             .rev = null,
