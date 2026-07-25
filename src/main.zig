@@ -396,18 +396,20 @@ fn runFlakeShow(allocator: std.mem.Allocator, io: Io, path: []const u8) !void {
 
     std.debug.print("Outputs:\n", .{});
     if (outputs == .attrs) {
-        printFlakeOutputs(allocator, outputs.attrs.bindings, 1);
+        printFlakeOutputs(&fe, allocator, outputs.attrs.bindings, 1);
     }
 }
 
-fn printFlakeOutputs(allocator: std.mem.Allocator, bindings: std.StringHashMap(eval.Value), indent: usize) void {
+fn printFlakeOutputs(fe: *flake.FlakeEvaluator, allocator: std.mem.Allocator, bindings: std.StringHashMap(eval.Value), indent: usize) void {
     var iter = bindings.iterator();
     while (iter.next()) |entry| {
         for (0..indent * 2) |_| std.debug.print(" ", .{});
 
         const key = entry.key_ptr.*;
-        const val = entry.value_ptr.*;
-
+        const val = fe.evaluator.force(entry.value_ptr.*) catch |err| {
+            std.debug.print("├───{s}: <error: {s}>\n", .{ key, @errorName(err) });
+            continue;
+        };
         if (val == .attrs) {
             // Check if it's a derivation
             if (val.attrs.bindings.get("type")) |type_val| {
@@ -423,7 +425,7 @@ fn printFlakeOutputs(allocator: std.mem.Allocator, bindings: std.StringHashMap(e
 
             // Regular attrset
             std.debug.print("├───{s}\n", .{key});
-            printFlakeOutputs(allocator, val.attrs.bindings, indent + 1);
+            printFlakeOutputs(fe, allocator, val.attrs.bindings, indent + 1);
         } else if (val == .lambda) {
             std.debug.print("├───{s}: <function>\n", .{key});
         } else {

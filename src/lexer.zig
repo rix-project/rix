@@ -116,7 +116,25 @@ pub const Lexer = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        for (self.allocated_strings.items) |s| self.allocator.free(s);
+        // NOTE: intentionally does NOT free the individual buffers tracked
+        // in `allocated_strings`. Those buffers back string/path/URI/quoted-
+        // identifier token payloads that get embedded directly into AST
+        // nodes (e.g. `Expr.AttrPath` formal/identifier names, string
+        // literals). The AST is returned from `Parser.parseExpr()` and
+        // routinely outlives the `Parser`/`Lexer` that built it (callers
+        // typically call `parser.deinit()` right after parsing while still
+        // holding onto the resulting `Expr`). Freeing them here previously
+        // caused a use-after-free: with an arena allocator, freeing the
+        // most recent allocation can hand the same memory back out to a
+        // subsequent, unrelated allocation, silently corrupting AST string
+        // slices (observed as garbage/mismatched formal names causing
+        // spurious `error.MissingAttribute` in `eval.apply`).
+        //
+        // Callers that use an arena (the common case, via
+        // `Evaluator.alloc()`) reclaim this memory in bulk when the arena
+        // is deinitialized, so this is not a leak in practice. Callers
+        // using a non-arena allocator for lexer-only work (e.g. tests) are
+        // responsible for using an arena too, or accepting the trade-off.
         self.allocated_strings.deinit(self.allocator);
     }
 

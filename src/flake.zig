@@ -476,12 +476,33 @@ pub const FlakeEvaluator = struct {
             }
 
             // Fetch the input
-            const fetch_result = self.fetcher.fetch(io, &ref, flake.path, fetch_node, self.allocator) catch |err| {
+            var fetch_result = self.fetcher.fetch(io, &ref, flake.path, fetch_node, self.allocator) catch |err| {
                 std.debug.print("Failed to fetch input '{s}': {}\n", .{ input_name, err });
                 fetch_node.completeOne();
                 continue;
             };
             fetch_node.completeOne();
+
+            // Register fetched network/VCS content into the Nix store,
+            // mirroring real Nix's `fetchTree` (which lands sources at
+            // `/nix/store/<hash>-source`), replacing the scratch `/tmp`
+            // fetch location. Local `path:` inputs are already the
+            // user-provided directory and are used in place.
+            if (ref.type != .path) {
+                if (self.nix_store.addToStore(io, "source", fetch_result.path)) |sp| {
+                    var sp_mut = sp;
+                    defer sp_mut.deinit();
+                    if (sp_mut.toPathIn(self.allocator, self.nix_store.store_dir)) |store_path_str| {
+                        std.Io.Dir.deleteTree(.cwd(), io, fetch_result.path) catch {};
+                        self.allocator.free(fetch_result.path);
+                        fetch_result.path = store_path_str;
+                    } else |err| {
+                        std.debug.print("Warning: failed to compute store path for input '{s}': {s}\n", .{ input_name, @errorName(err) });
+                    }
+                } else |err| {
+                    std.debug.print("Warning: failed to add input '{s}' to store: {s}\n", .{ input_name, @errorName(err) });
+                }
+            }
 
             var resolved_input = ResolvedFlake.ResolvedInput{
                 .flake = null,
