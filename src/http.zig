@@ -100,7 +100,7 @@ pub const HttpFetcher = struct {
         // Look for common patterns like /archive/refs/tags/v1.0.tar.gz
         if (std.mem.indexOf(u8, url, "/archive/")) |idx| {
             const after_archive = url[idx + 9 ..];
-            if (std.mem.indexOf(u8, after_archive, "/")) |slash_idx| {
+            if (std.mem.lastIndexOf(u8, after_archive, "/")) |slash_idx| {
                 const hash_part = after_archive[slash_idx + 1 ..];
                 if (std.mem.indexOf(u8, hash_part, ".tar")) |tar_idx| {
                     return hash_part[0..tar_idx];
