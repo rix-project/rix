@@ -480,7 +480,7 @@ pub const FlakeEvaluator = struct {
             }
 
             // Fetch the input
-            var fetch_result = self.fetcher.fetch(io, &ref, flake.path, fetch_node, self.allocator) catch |err| {
+            const fetch_result = self.fetcher.fetch(io, &ref, flake.path, fetch_node, self.allocator) catch |err| {
                 std.debug.print("Failed to fetch input '{s}': {}\n", .{ input_name, err });
                 fetch_node.completeOne();
                 continue;
@@ -720,7 +720,7 @@ pub const FlakeEvaluator = struct {
                     const sub_outputs = self.evalOutputs(fl) catch |err| blk: {
                         std.debug.print("Warning: failed to eval outputs for sub-flake '{s}': {}\n", .{ name, err });
                         if (@errorReturnTrace()) |trace| {
-                            std.debug.dumpStackTrace(trace);
+                            std.debug.dumpErrorReturnTrace(trace);
                         }
                         break :blk Value{ .attrs = .{ .bindings = std.StringHashMap(Value).init(eval_alloc) } };
                     };

@@ -1,8 +1,8 @@
 {
   description = "The purely functional package manager";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs";
-  inputs.zig-flake.url = "github:zix-os/zig-flake";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.zig-flake.url = "github:zix-project/zig-flake";
 
   outputs =
     {
@@ -23,7 +23,7 @@
       packages = eachSystem (
         system:
         with (nixpkgs.legacyPackages.${system}.appendOverlays [
-          zig-flake.overlays.default
+          # zig-flake.overlays.default
         ]); {
           zix = callPackage ./default.nix {
             inherit self;
@@ -34,7 +34,7 @@
       devShells = eachSystem (
         system:
         with (nixpkgs.legacyPackages.${system}.appendOverlays [
-          zig-flake.overlays.default
+          # zig-flake.overlays.default
         ]); {
           default = mkShell {
             nativeBuildInputs = [
