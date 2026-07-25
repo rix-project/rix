@@ -319,7 +319,9 @@ fn builtinMap(eval_ctx: ?*eval.Evaluator, io: std.Io, allocator: std.mem.Allocat
     const list = list_val.list;
     var result = try allocator.alloc(Value, list.len);
     for (list, 0..) |item, i| {
-        result[i] = try evaluator.apply(func, item);
+        // Lazy per-element, like `mapAttrs` above (see comment there).
+        const thunk = try evaluator.createNativeThunk(func, &.{item});
+        result[i] = Value{ .thunk = thunk };
     }
     return Value{ .list = result };
 }
@@ -558,9 +560,14 @@ fn builtinMapAttrs(eval_ctx: ?*eval.Evaluator, io: std.Io, allocator: std.mem.Al
     var result = std.StringHashMap(Value).init(allocator);
     var iter = set.attrs.bindings.iterator();
     while (iter.next()) |entry| {
-        const applied = try evaluator.apply(func, Value{ .string = entry.key_ptr.* });
-        const val = try evaluator.apply(applied, entry.value_ptr.*);
-        try result.put(entry.key_ptr.*, val);
+        // Defer computing `f name value` until this specific attribute is
+        // actually forced (real Nix's `mapAttrs` is lazy per-attribute).
+        // This matters for correctness, not just performance: nixpkgs'
+        // module system and overlay/fixpoint machinery rely on `mapAttrs`
+        // not eagerly evaluating callbacks whose values reference other
+        // not-yet-ready parts of the same recursive structure.
+        const thunk = try evaluator.createNativeThunk(func, &.{ Value{ .string = entry.key_ptr.* }, entry.value_ptr.* });
+        try result.put(entry.key_ptr.*, Value{ .thunk = thunk });
     }
 
     return Value{ .attrs = .{ .bindings = result } };

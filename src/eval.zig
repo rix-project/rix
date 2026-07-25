@@ -74,11 +74,30 @@ pub const Value = union(enum) {
     }
 };
 
+/// A deferred computation for values constructed by builtins (e.g.
+/// `mapAttrs`, `map`) that don't have a source `Expr`/`Env` to re-evaluate
+/// lazily, but must still defer computation of the *value* (as opposed to
+/// eagerly `apply`-ing right when the builtin runs) to preserve Nix's
+/// laziness semantics. Without this, self-referential/fixpoint patterns
+/// (`lib.fix`, overlay composition, the module system's `mapAttrs`-based
+/// option merging, etc.) can observe not-yet-constructed values or throw
+/// spuriously, since forcing normally-lazy attributes early can occur
+/// before the surrounding recursive structure is fully assembled.
+pub const NativeThunk = struct {
+    /// Function value to apply, followed by `args` in order (curried
+    /// application), e.g. `func arg0 arg1` for `mapAttrs`'s `f name value`.
+    func: Value,
+    args: []const Value,
+};
+
 pub const Thunk = struct {
-    expr: *Expr,
-    env: *Env,
-    value: ?Value,
-    evaluating: bool,
+    /// Exactly one of `expr`/`env` (AST-backed) or `native` (builtin-
+    /// constructed) is set.
+    expr: ?*Expr = null,
+    env: ?*Env = null,
+    native: ?*NativeThunk = null,
+    value: ?Value = null,
+    evaluating: bool = false,
 };
 
 pub const Env = struct {
@@ -166,12 +185,31 @@ pub const Evaluator = struct {
     }
 
     /// Create a Thunk via the arena allocator.
-    fn createThunk(self: *Self, expr: *Expr, env: *Env) !*Thunk {
+    pub fn createThunk(self: *Self, expr: *Expr, env: *Env) !*Thunk {
         const allocator = self.arena.allocator();
         const thunk = try allocator.create(Thunk);
         thunk.* = Thunk{
             .expr = expr,
             .env = env,
+            .value = null,
+            .evaluating = false,
+        };
+        return thunk;
+    }
+
+    /// Create a lazy Thunk wrapping a deferred builtin-side computation:
+    /// applying `func` to `args` in order, only when actually forced. See
+    /// `NativeThunk` for why this exists.
+    pub fn createNativeThunk(self: *Self, func: Value, args: []const Value) !*Thunk {
+        const allocator = self.arena.allocator();
+        const native = try allocator.create(NativeThunk);
+        native.* = NativeThunk{
+            .func = func,
+            .args = try allocator.dupe(Value, args),
+        };
+        const thunk = try allocator.create(Thunk);
+        thunk.* = Thunk{
+            .native = native,
             .value = null,
             .evaluating = false,
         };
@@ -466,8 +504,16 @@ pub const Evaluator = struct {
                                     if (forced_arg.attrs.bindings.get(formal.name)) |val| {
                                         try call_env.define(formal.name, val);
                                     } else if (formal.default) |def| {
-                                        const default_val = try self.evalInEnv(def.*, call_env);
-                                        try call_env.define(formal.name, default_val);
+                                        // Defaults must be lazy: they're
+                                        // frequently used as "this should
+                                        // never actually be needed" poison
+                                        // pills (e.g. nixpkgs'
+                                        // `vendor ? assert false; null`),
+                                        // relying on the body never forcing
+                                        // the bare formal when it takes an
+                                        // `@args`-based code path instead.
+                                        const thunk = try self.createThunk(def, call_env);
+                                        try call_env.define(formal.name, Value{ .thunk = thunk });
                                     } else {
                                         return error.MissingAttribute;
                                     }
@@ -578,6 +624,7 @@ pub const Evaluator = struct {
                 const cond_bool = try self.toBool(cond);
 
                 if (!cond_bool) {
+                    std.debug.print("assertion failed at line {d}, column {d}\n", .{ a.span.line, a.span.column });
                     return error.AssertionFailed;
                 }
 
@@ -811,13 +858,32 @@ pub const Evaluator = struct {
             }
 
             thunk.evaluating = true;
-            const result = try self.evalInEnv(thunk.expr.*, thunk.env);
+            // On error, un-mark `evaluating` so a subsequent force attempt
+            // (e.g. after being caught by `builtins.tryEval` elsewhere)
+            // re-evaluates and gets the real error again, rather than a
+            // misleading `InfiniteRecursion` from a thunk permanently stuck
+            // "mid-evaluation" after its first attempt failed.
+            errdefer thunk.evaluating = false;
+            const result = if (thunk.native) |native|
+                try self.forceNativeThunk(native)
+            else
+                try self.evalInEnv(thunk.expr.?.*, thunk.env.?);
             thunk.value = result;
             thunk.evaluating = false;
 
             current = result;
         }
         return current;
+    }
+
+    /// Compute a builtin-constructed lazy value by applying `native.func`
+    /// to each of `native.args` in order (curried application).
+    fn forceNativeThunk(self: *Self, native: *NativeThunk) anyerror!Value {
+        var result = native.func;
+        for (native.args) |a| {
+            result = try self.apply(result, a);
+        }
+        return result;
     }
 
     /// Apply a function value to an argument
@@ -847,8 +913,11 @@ pub const Evaluator = struct {
                             if (forced_arg.attrs.bindings.get(formal.name)) |val| {
                                 try call_env.define(formal.name, val);
                             } else if (formal.default) |def| {
-                                const default_val = try self.evalInEnv(def.*, call_env);
-                                try call_env.define(formal.name, default_val);
+                                // See matching comment in the `.call`
+                                // handling of `evalInEnv`: defaults must
+                                // stay lazy.
+                                const thunk = try self.createThunk(def, call_env);
+                                try call_env.define(formal.name, Value{ .thunk = thunk });
                             } else if (!p.ellipsis) {
                                 return error.MissingAttribute;
                             }
