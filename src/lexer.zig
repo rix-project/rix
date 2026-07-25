@@ -116,6 +116,7 @@ pub const Lexer = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        for (self.allocated_strings.items) |s| self.allocator.free(s);
         self.allocated_strings.deinit(self.allocator);
     }
 
