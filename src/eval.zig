@@ -799,8 +799,18 @@ pub const Evaluator = struct {
         };
     }
 
-    pub fn equal(self: *Self, lval: Value, rval: Value) !bool {
-        _ = self;
+    /// Structural (deep) equality per Nix semantics: lists/attrsets compare
+    /// element-by-element/key-by-key (forcing nested thunks as needed);
+    /// ints and floats compare across type; functions are never equal.
+    pub fn equal(self: *Self, lval: Value, rval: Value) anyerror!bool {
+        // Cross-type numeric comparison: `1 == 1.0` is true in Nix.
+        if (lval == .int and rval == .float) {
+            return @as(f64, @floatFromInt(lval.int)) == rval.float;
+        }
+        if (lval == .float and rval == .int) {
+            return lval.float == @as(f64, @floatFromInt(rval.int));
+        }
+
         if (@backingInt(lval) != @backingInt(rval)) return false;
 
         return switch (lval) {
@@ -810,6 +820,30 @@ pub const Evaluator = struct {
             .string => std.mem.eql(u8, lval.string, rval.string),
             .path => std.mem.eql(u8, lval.path, rval.path),
             .null_val => true,
+            .list => |l| {
+                const r = rval.list;
+                if (l.len != r.len) return false;
+                for (l, r) |le, re| {
+                    const lf = try self.force(le);
+                    const rf = try self.force(re);
+                    if (!try self.equal(lf, rf)) return false;
+                }
+                return true;
+            },
+            .attrs => |a| {
+                const b = rval.attrs;
+                if (a.bindings.count() != b.bindings.count()) return false;
+                var iter = a.bindings.iterator();
+                while (iter.next()) |entry| {
+                    const rv = b.bindings.get(entry.key_ptr.*) orelse return false;
+                    const lf = try self.force(entry.value_ptr.*);
+                    const rf = try self.force(rv);
+                    if (!try self.equal(lf, rf)) return false;
+                }
+                return true;
+            },
+            // Functions (and any residual unforced thunks) are never equal,
+            // matching Nix's treatment of function equality.
             else => false,
         };
     }
