@@ -400,7 +400,8 @@ fn gitClone(
         var ref_it: git.Session.RefIterator = undefined;
         var list_buf: [git.Packet.max_data_length]u8 = undefined;
         try session.listRefs(&ref_it, .{
-            .ref_prefixes = &.{ "refs/heads/", "refs/tags/" },
+            .ref_prefixes = &.{ "HEAD", "refs/heads/", "refs/tags/" },
+            .include_symrefs = true,
             .buffer = &list_buf,
         });
         defer ref_it.deinit();

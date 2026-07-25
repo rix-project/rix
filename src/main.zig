@@ -352,7 +352,10 @@ fn runFlakeShow(allocator: std.mem.Allocator, io: Io, path: []const u8) !void {
         std.debug.print("Failed to load flake: {}\n", .{err});
         return err;
     };
-    defer fl.deinit();
+    // NOTE: `fe.resolve()` below takes `fl` by value and stores it inside
+    // `resolved.flake`, taking ownership of its allocations. `resolved.deinit()`
+    // (deferred after resolve succeeds) is responsible for freeing it, so we
+    // must NOT also `defer fl.deinit()` here or it becomes a double free.
 
     // Print description
     if (fl.description) |desc| {
@@ -464,11 +467,12 @@ fn runFlakeLock(allocator: std.mem.Allocator, io: Io, path: []const u8) !void {
     var fe = try flake.FlakeEvaluator.init(allocator, io);
     defer fe.deinit();
 
-    var fl = fe.loadFlakeWithIo(io, path) catch |err| {
+    const fl = fe.loadFlakeWithIo(io, path) catch |err| {
         std.debug.print("Failed to load flake: {}\n", .{err});
         return err;
     };
-    defer fl.deinit();
+    // See NOTE in runFlakeShow: `fe.resolve()` takes ownership of `fl`, so
+    // no separate `fl.deinit()` here.
 
     var resolved = resolve_blk: {
         var draw_buffer_lock: [4096]u8 = undefined;
