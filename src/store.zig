@@ -194,40 +194,54 @@ pub const Derivation = struct {
 
 /// The Nix store interface.
 ///
-/// This is a minimal, local-filesystem implementation of a Nix-style
-/// content-addressed store (inspired by nix-store / sqlite-zig's on-disk
-/// layout). Fetched/derived content lives under `store_dir` in
-/// `<hash>-<name>` directories, mirroring the real Nix store layout but
-/// rooted at a project-local or user-local directory instead of `/nix/store`
-/// so it works without root privileges.
+/// Mirrors real Nix's on-disk layout: content-addressed paths live directly
+/// under `/nix/store/<hash>-<name>` (see `StorePath`), a small sqlite-style
+/// registry lives under `/nix/var/nix/db`, and all scratch/build work
+/// happens under a temporary directory (`/tmp`) before being moved into the
+/// store, exactly like `nix-store`/`nix build` do. This requires the same
+/// filesystem permissions real Nix does (typically root, or a
+/// pre-provisioned `/nix` with appropriate ownership); use `initWithRoot`
+/// to point at a sandboxed/user-writable root instead (e.g. for tests or
+/// unprivileged development).
 pub const Store = struct {
     allocator: std.mem.Allocator,
     store_dir: []const u8,
     db_path: []const u8,
+    /// Scratch directory for in-progress fetches/builds before their
+    /// output is moved into `store_dir`. Real Nix builds happen in `/tmp`
+    /// (or `$TMPDIR`) and only the final, validated output is copied into
+    /// `/nix/store`.
+    tmp_dir: []const u8,
     owns_store_dir: bool,
 
-    /// Default store root used when no explicit root is provided.
-    pub const default_store_dir = ".zix-cache/store";
+    /// Default store root used when no explicit root is provided, matching
+    /// the real Nix store location.
+    pub const default_store_dir = "/nix/store";
+    pub const default_db_path = "/nix/var/nix/db/db.sqlite";
+    pub const default_tmp_dir = "/tmp/zix-build";
 
     pub fn init(allocator: std.mem.Allocator) Store {
         return Store{
             .allocator = allocator,
             .store_dir = default_store_dir,
-            .db_path = ".zix-cache/store.db",
+            .db_path = default_db_path,
+            .tmp_dir = default_tmp_dir,
             .owns_store_dir = false,
         };
     }
 
     /// Create a store rooted at an explicit directory (e.g. a per-flake or
-    /// XDG cache directory chosen by the caller). The returned Store owns
-    /// (and will free) `store_dir`.
+    /// user-writable cache directory chosen by the caller, for sandboxed or
+    /// unprivileged use). The returned Store owns (and will free) its paths.
     pub fn initWithRoot(allocator: std.mem.Allocator, root_dir: []const u8) !Store {
         const store_dir = try std.fs.path.join(allocator, &.{ root_dir, "store" });
         const db_path = try std.fs.path.join(allocator, &.{ root_dir, "store.db" });
+        const tmp_dir = try std.fs.path.join(allocator, &.{ root_dir, "tmp" });
         return Store{
             .allocator = allocator,
             .store_dir = store_dir,
             .db_path = db_path,
+            .tmp_dir = tmp_dir,
             .owns_store_dir = true,
         };
     }
@@ -236,6 +250,7 @@ pub const Store = struct {
         if (self.owns_store_dir) {
             self.allocator.free(self.store_dir);
             self.allocator.free(self.db_path);
+            self.allocator.free(self.tmp_dir);
         }
     }
 
@@ -320,16 +335,25 @@ pub const Store = struct {
         }
 
         const Dir = std.Io.Dir;
-        if (std.fs.path.dirname(out_path)) |parent| {
-            try Dir.createDirPath(.cwd(), io, parent);
-        }
 
         if (drv.builder.len == 0) {
             // Nothing to execute; just materialize an empty output directory
             // so downstream consumers have a stable path to reference.
+            if (std.fs.path.dirname(out_path)) |parent| {
+                try Dir.createDirPath(.cwd(), io, parent);
+            }
             Dir.createDirPath(.cwd(), io, out_path) catch {};
             return out_path;
         }
+
+        // Real Nix builds happen in a scratch directory under /tmp; only
+        // the finished, validated output is moved into the store. Do the
+        // same here so partial/failed builds never pollute `store_dir`.
+        const build_dir = try store_path.toPathIn(self.allocator, self.tmp_dir);
+        defer self.allocator.free(build_dir);
+        Dir.deleteTree(.cwd(), io, build_dir) catch {};
+        try Dir.createDirPath(.cwd(), io, build_dir);
+        errdefer Dir.deleteTree(.cwd(), io, build_dir) catch {};
 
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(self.allocator);
@@ -342,18 +366,41 @@ pub const Store = struct {
         while (env_iter.next()) |entry| {
             try env.put(entry.key_ptr.*, entry.value_ptr.*);
         }
-        try env.put("out", out_path);
+        // The builder writes its output into the tmp scratch dir; `out`
+        // only becomes the real store path once the build succeeds and we
+        // move it in below (matching real Nix's build-then-register flow).
+        try env.put("out", build_dir);
 
-        std.debug.print("Building {s} -> {s}\n", .{ drv.name, out_path });
+        std.debug.print("Building {s} in {s} -> {s}\n", .{ drv.name, build_dir, out_path });
         var child = std.process.spawn(io, .{
             .argv = argv.items,
             .environ_map = &env,
         }) catch |err| {
             std.debug.print("Build failed for {s}: {s}\n", .{ drv.name, @errorName(err) });
-            return out_path;
+            return err;
         };
-        _ = child.wait(io) catch |err| {
+        const term = child.wait(io) catch |err| {
             std.debug.print("Build wait failed for {s}: {s}\n", .{ drv.name, @errorName(err) });
+            return err;
+        };
+        switch (term) {
+            .exited => |code| if (code != 0) {
+                std.debug.print("Build of {s} failed with exit code {d}\n", .{ drv.name, code });
+                return error.BuildFailed;
+            },
+            else => {
+                std.debug.print("Build of {s} terminated abnormally: {}\n", .{ drv.name, term });
+                return error.BuildFailed;
+            },
+        }
+
+        // Move the validated build output from /tmp into the store.
+        if (std.fs.path.dirname(out_path)) |parent| {
+            try Dir.createDirPath(.cwd(), io, parent);
+        }
+        Dir.rename(.cwd(), build_dir, .cwd(), out_path, io) catch {
+            try copyDirRecursive(io, build_dir, out_path);
+            Dir.deleteTree(.cwd(), io, build_dir) catch {};
         };
 
         return out_path;

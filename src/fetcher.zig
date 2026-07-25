@@ -25,10 +25,18 @@ pub const Fetcher = struct {
     cache_dir: []const u8,
     http_fetcher: http.HttpFetcher,
 
+    /// Scratch space for downloads/clones/extraction before final content
+    /// is registered into the Nix store, mirroring real Nix's use of
+    /// `/tmp` (`$TMPDIR`) for build/fetch work-in-progress.
+    ///
+    /// TODO: once fetched, content should be moved into `Store` via
+    /// `Store.addToStore` (content-addressed under `/nix/store`) instead of
+    /// being referenced directly from `/tmp`; this is the next incremental
+    /// step toward full nixpkgs compatibility.
     pub fn init(allocator: std.mem.Allocator, io: Io) Fetcher {
         return .{
             .allocator = allocator,
-            .cache_dir = ".zix-cache",
+            .cache_dir = "/tmp/zix-cache",
             .http_fetcher = http.HttpFetcher.init(allocator, io),
         };
     }
