@@ -195,6 +195,78 @@ pub const Evaluator = struct {
         };
     }
 
+    /// A node in the tree used to merge multi-part ("dotted") attribute
+    /// path bindings within a single attrset literal, e.g.:
+    ///
+    ///   rec {
+    ///     types.openCpuType = { ... };
+    ///     types.bitWidth = ...;
+    ///   }
+    ///
+    /// which must produce a single merged `types` attribute containing
+    /// both `openCpuType` and `bitWidth`, rather than each dotted binding
+    /// silently overwriting (or being dropped from) the others. This is an
+    /// extremely common pattern throughout nixpkgs (and Nix generally).
+    const AttrNode = struct {
+        /// Set when this node is a direct assignment target, e.g. the
+        /// `= value` in `a.b = value;` sets the leaf at node `b`.
+        leaf: ?*Expr = null,
+        children: std.StringHashMap(*AttrNode),
+
+        fn create(allocator: std.mem.Allocator) !*AttrNode {
+            const node = try allocator.create(AttrNode);
+            node.* = .{ .children = std.StringHashMap(*AttrNode).init(allocator) };
+            return node;
+        }
+
+        fn getOrCreateChild(self: *AttrNode, allocator: std.mem.Allocator, key: []const u8) !*AttrNode {
+            if (self.children.get(key)) |existing| return existing;
+            const child = try AttrNode.create(allocator);
+            try self.children.put(key, child);
+            return child;
+        }
+    };
+
+    /// Insert one (possibly multi-part) binding into the merge tree rooted
+    /// at `node`. `key_env` is the environment used to resolve dynamic
+    /// (`${...}`) attribute name parts, matching existing single-part
+    /// behavior.
+    fn insertAttrPath(self: *Self, node: *AttrNode, parts: []Expr.AttrPathPart, value: *Expr, key_env: *Env) !void {
+        if (parts.len == 0) return;
+        const key = try self.resolveAttrKey(parts[0], key_env) orelse return;
+        const child = try node.getOrCreateChild(self.alloc(), key);
+        if (parts.len == 1) {
+            child.leaf = value;
+        } else {
+            try self.insertAttrPath(child, parts[1..], value, key_env);
+        }
+    }
+
+    /// Convert a merge tree into the final attrset bindings, creating a
+    /// lazy thunk for each true leaf value and recursing for merged
+    /// (dotted-path) nodes. `thunk_env` is the environment leaf thunks
+    /// close over (the extended rec env for `rec` sets, or the ambient
+    /// env otherwise), matching existing single-part behavior.
+    fn attrNodeToBindings(self: *Self, node: *AttrNode, thunk_env: *Env) !std.StringHashMap(Value) {
+        var bindings = std.StringHashMap(Value).init(self.alloc());
+        var it = node.children.iterator();
+        while (it.next()) |entry| {
+            const child = entry.value_ptr.*;
+            if (child.children.count() > 0) {
+                // Merged intermediate node (dotted-path parent): build its
+                // nested attrset directly. This isn't itself lazy (it has
+                // no single source expression to thunk), but every leaf
+                // underneath it remains individually lazy.
+                const nested = try self.attrNodeToBindings(child, thunk_env);
+                try bindings.put(entry.key_ptr.*, Value{ .attrs = .{ .bindings = nested } });
+            } else if (child.leaf) |expr| {
+                const thunk = try self.createThunk(expr, thunk_env);
+                try bindings.put(entry.key_ptr.*, Value{ .thunk = thunk });
+            }
+        }
+        return bindings;
+    }
+
     pub fn eval(self: *Self, expr: Expr) !Value {
         const result = try self.evalInEnv(expr, self.global_env);
         return try self.force(result);
@@ -293,28 +365,29 @@ pub const Evaluator = struct {
             .attrs => |a| {
                 var attr_env = try self.createEnv(env);
                 _ = &attr_env;
-                var bindings = std.StringHashMap(Value).init(self.alloc());
 
-                // If recursive, evaluate in extended env
+                // Build the merge tree first (purely structural: resolves
+                // attribute-name parts but does not evaluate any values),
+                // so multi-part ("dotted") bindings like `a.b = x; a.c = y;`
+                // correctly merge into a single nested `a = { b = x; c = y; }`
+                // instead of clobbering/dropping each other.
+                const key_env = if (a.recursive) attr_env else env;
+                const thunk_env = key_env;
+                const root = try AttrNode.create(self.alloc());
+                for (a.bindings) |binding| {
+                    try self.insertAttrPath(root, binding.key.parts, binding.value, key_env);
+                }
+
+                const bindings = try self.attrNodeToBindings(root, thunk_env);
+
                 if (a.recursive) {
-                    // First pass: create thunks
-                    for (a.bindings) |binding| {
-                        if (binding.key.parts.len == 1) {
-                            const key = try self.resolveAttrKey(binding.key.parts[0], attr_env) orelse continue;
-                            const thunk = try self.createThunk(binding.value, attr_env);
-                            try bindings.put(key, Value{ .thunk = thunk });
-                            try attr_env.define(key, Value{ .thunk = thunk });
-                        }
-                    }
-                } else {
-                    // Non-recursive: still use thunks for lazy evaluation.
-                    // Nix attrset values are lazy even in non-recursive sets.
-                    for (a.bindings) |binding| {
-                        if (binding.key.parts.len == 1) {
-                            const key = try self.resolveAttrKey(binding.key.parts[0], env) orelse continue;
-                            const thunk = try self.createThunk(binding.value, env);
-                            try bindings.put(key, Value{ .thunk = thunk });
-                        }
+                    // Make every top-level name (including merged dotted-
+                    // path parents like `types`) visible to sibling
+                    // bindings for self-reference, matching `rec`'s
+                    // mutual-recursion semantics.
+                    var it = bindings.iterator();
+                    while (it.next()) |entry| {
+                        try attr_env.define(entry.key_ptr.*, entry.value_ptr.*);
                     }
                 }
 
