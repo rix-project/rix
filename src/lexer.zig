@@ -657,7 +657,25 @@ pub const Lexer = struct {
                 self.advance();
             } else break;
         }
-        const path = path_buf.items;
+        // Path literals (e.g. `./lib/foo.nix`, `../bar.nix`) are lexically
+        // scoped to the file they appear in: Nix resolves them relative to
+        // the *source file's* directory, not the process's current working
+        // directory. Without this, `import ./x.nix` inside a flake fetched
+        // into e.g. `/nix/store/...-source/flake.nix` would incorrectly
+        // resolve against our own CWD and fail with FileNotFound.
+        //
+        // Absolute paths (leading `/`) are left untouched. Relative paths
+        // are only resolved when `self.filename` looks like a real,
+        // resolvable file path (has a directory component); synthetic
+        // names used in tests/REPL (e.g. "<input>", "test") are left as-is
+        // to preserve existing relative-path test behavior.
+        const path = resolve_blk: {
+            const raw = path_buf.items;
+            if (raw.len == 0 or raw[0] == '/') break :resolve_blk try self.allocator.dupe(u8, raw);
+            if (self.filename.len == 0 or self.filename[0] == '<') break :resolve_blk try self.allocator.dupe(u8, raw);
+            const dir = std.fs.path.dirname(self.filename) orelse break :resolve_blk try self.allocator.dupe(u8, raw);
+            break :resolve_blk std.fs.path.resolve(self.allocator, &.{ dir, raw }) catch try self.allocator.dupe(u8, raw);
+        };
         try self.allocated_strings.append(self.allocator, path);
         return Token{ .kind = .path, .value = .{ .path = path }, .line = line, .column = column, .offset = start };
     }
